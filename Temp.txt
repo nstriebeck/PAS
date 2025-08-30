@@ -1,0 +1,85 @@
+Private Declare Function OpenMO Lib "submgr.dll" (ByVal username As String) As Integer
+Private Declare Sub CloseMO Lib "submgr.dll" ()
+Private Declare Function OpenPatient Lib "submgr.dll" (ByVal PatNr As Long, ByVal ScheinNr As Long) As Long
+
+Public Declare Sub OutputDebugString _
+               Lib "kernel32.dll" _
+               Alias "OutputDebugStringA" (ByVal lpOutputString As String)
+			   
+Public Function MOInit() As Boolean
+
+        On Error resume next
+        Dim sUsername As String
+		
+     sUsername = "admin"
+
+
+         If OpenMO(sUsername) = 0 Then
+             SMW2MODebugLog "MO-Funktion 'OpenMO' mit dem Parameter '" & sUsername & "' wird aufgerufen und hat den Wert '0' zurückgegeben..."
+             MOInit = False
+         Else
+             MOInit = True
+         End If
+End Function
+
+
+Public Sub MOClose()
+        On Error Resume Next
+     Call CloseMO
+
+End Sub
+
+Public Function OpenPatient_In_MO(ByVal PatientID As Long) As Long
+
+        'Patienten in Medical Office aufrufen
+        'Schritt 1: MO-PatID als SMW-Pat-ID ermitteln
+        'Schritt 2: Schein-ID ermitteln
+        On Error GoTo Proc_Err
+
+        Dim lMOID    As Long
+        Dim lngKSID  As Long
+        Dim lErg     As Long
+        Dim sQuartal As String
+        
+100     SMWDebugLog "Funktion 'OpenPatient_In_MO' in Klasse 'cls_MO' für lfdNr = " & PatientID & " aufgerufen"
+102     lMOID = DBLookUp("PatID", "Adresse", "(lfdNr = " & PatientID & ")", 0)
+ 
+104     If lMOID <> 0 Then
+            'Patient gefunden, versuche Schein-ID zu ermitteln
+106         sQuartal = DatePart("yyyy", Now) & DatePart("q", Now)
+108         lngKSID = DBLookUp("KSID", "tbl_KS", "[lfdNr]=" & PatientID & " AND [Quartal]='" & sQuartal & "'", 0)
+110         SMWDebugLog "PatID_MO = " & lMOID & " Schein-ID für Quartal '" & sQuartal & "' lautet: " & lngKSID & "; Patient wird jetzt in MO aufgerufen"
+112         lErg = OpenPatient(lMOID, lngKSID)
+114         SMWDebugLog "Rückgabewert der Funktion 'OpenPatient': " & lErg
+116         OpenPatient_In_MO = lErg
+118         GoTo Proc_Exit
+        Else
+120         SMWDebugLog "Keine MO-Patienten-ID gefunden, Funktion wird beendet"
+122         OpenPatient_In_MO = 0
+124         GoTo Proc_Exit
+        End If
+
+Proc_Exit:
+
+        Exit Function
+
+Proc_Err:
+126     SMWDebugLog "Es trat ein Fehler in der Funktion 'OpenPatient_In_MO' in Klasse 'cls_MO' auf: Fehler-Nummer = " & Err.Number & "; Zeile = " & Erl & "; Beschreibung: " & Err.Description
+End Function
+
+
+Public Sub SMWDebugLog(ByVal sText As String)
+    Dim f As Long
+
+    On Error Resume Next
+
+    If blSMWDebugLog = True Then
+        f = FreeFile
+        Open Access.Application.CurrentProject.Path & "\Event.log" For Append As #f
+        Print #f, sText & vbCrLf
+        Close #f
+    End If
+
+    OutputDebugString ("SMW32: " & sText)
+
+End Sub

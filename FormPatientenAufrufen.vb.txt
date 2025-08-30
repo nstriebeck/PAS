@@ -1,0 +1,1398 @@
+Imports System.Data.SqlClient
+Imports System.Net
+Imports System.Text
+Imports System.IO
+Imports System.Threading
+Imports System.Diagnostics
+Imports Newtonsoft.Json
+Imports QRCoder
+
+Public Class FormPatientenAufruf
+    Private connectionString As String = "Server=SILINSQL\PatientenAufruf;Database=PatientenAufruf;User Id=sa;Password=PatientenAufruf4711;"
+    Private masterConnectionString As String = "Server=SILINSQL\PatientenAufruf;Database=master;User Id=sa;Password=PatientenAufruf4711;"
+    Private httpListener As HttpListener
+    Private isListening As Boolean = False
+    Private listenerThread As Thread
+    Private qrAnzeigeForm As FormQRAnzeige
+    Private isAdmin As Boolean = False
+    
+    ' Konfigurierbare URLs
+    Private internalServerUrl As String = "http://192.168.1.100:8080"
+    Private externalBaseUrl As String = "https://www.ihre-praxis.de/patient"
+    Private useExternalUrl As Boolean = True
+    
+    ' Timer für automatische Aktualisierung
+    Private autoRefreshTimer As System.Windows.Forms.Timer
+    Private autoRefreshInterval As Integer = 5000
+    
+    ' GDT-Integration
+    Private gdtWatchFolder As String = "C:\GDT\Import"
+    Private gdtFilePattern As String = "*.gdt"
+    Private gdtCheckTimer As System.Windows.Forms.Timer
+    Private processedGDTFiles As New Dictionary(Of String, DateTime)
+
+    ' Datenstrukturen
+    Public Class PatientenAufruf
+        Public Property ID As Integer
+        Public Property PatientenID As String
+        Public Property Vorname As String
+        Public Property Nachname As String
+        Public Property Zimmer As String
+        Public Property Status As String
+        Public Property AufrufZeit As DateTime
+        Public Property AbschlussZeit As DateTime
+        Public Property Bemerkungen As String
+        Public Property ErstelltAm As DateTime
+        
+        Public ReadOnly Property DisplayName As String
+            Get
+                If String.IsNullOrEmpty(Vorname) And String.IsNullOrEmpty(Nachname) Then
+                    Return $"Patient {PatientenID}"
+                Else
+                    Return $"{Vorname} {Nachname} (ID: {PatientenID})".Trim()
+                End If
+            End Get
+        End Property
+    End Class
+
+    Private Sub FormPatientenAufruf_Load(sender As Object, e As EventArgs) Handles MyBase.Load
+        InitializeDatabase()
+        CheckAdminRights()
+        StartWebServer()
+        LoadPatientenListe()
+        
+        ' QR-Anzeige-Form erstellen
+        qrAnzeigeForm = New FormQRAnzeige()
+        Dim qrBaseUrl As String = If(useExternalUrl, externalBaseUrl, internalServerUrl)
+        qrAnzeigeForm.SetServerUrl(qrBaseUrl)
+        
+        ' Timer starten
+        StartAutoRefresh()
+        
+        ' GDT-Überwachung
+        ProcessExistingGDTFiles()
+        StartGDTMonitoring()
+        
+        ' Admin-spezifische UI-Elemente
+        btnLoeschen.Visible = isAdmin
+        If isAdmin Then
+            Me.Text &= " [ADMIN]"
+        End If
+    End Sub
+    
+    Private Sub CheckAdminRights()
+        ' Option 1: Windows-Admin prüfen
+        Try
+            Dim identity = System.Security.Principal.WindowsIdentity.GetCurrent()
+            Dim principal = New System.Security.Principal.WindowsPrincipal(identity)
+            isAdmin = principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator)
+        Catch
+            isAdmin = False
+        End Try
+        
+        ' Option 2: Bestimmte Benutzer als Admin
+        ' Dim currentUser As String = Environment.UserName
+        ' isAdmin = (currentUser = "Administrator" OrElse currentUser = "Dr.Meyer")
+    End Sub
+    
+    Private Sub StartGDTMonitoring()
+        gdtCheckTimer = New System.Windows.Forms.Timer()
+        gdtCheckTimer.Interval = 2000
+        AddHandler gdtCheckTimer.Tick, AddressOf CheckForGDTFiles
+        gdtCheckTimer.Start()
+        lblStatus.Text = "GDT-Überwachung aktiv (Timer)"
+    End Sub
+    
+    Private Sub CheckForGDTFiles(sender As Object, e As EventArgs)
+        Try
+            If Directory.Exists(gdtWatchFolder) Then
+                Dim gdtFiles() As String = Directory.GetFiles(gdtWatchFolder, "*.gdt", SearchOption.TopDirectoryOnly)
+                
+                For Each gdtFile As String In gdtFiles
+                    Try
+                        ' Backup-Ordner erstellen
+                        Dim backupFolder As String = Path.Combine(gdtWatchFolder, "Backup")
+                        If Not Directory.Exists(backupFolder) Then
+                            Directory.CreateDirectory(backupFolder)
+                        End If
+                        
+                        ' SOFORT verschieben
+                        Dim backupFile As String = Path.Combine(backupFolder, 
+                            $"{DateTime.Now:yyyyMMdd_HHmmss}_{Path.GetFileName(gdtFile)}")
+                        File.Move(gdtFile, backupFile)
+                        
+                        ' Aus Backup parsen
+                        Dim patient As GDTParser.GDTPatient = GDTParser.ParseGDTFile(backupFile)
+                        
+                        If patient IsNot Nothing Then
+                            OnGDTFileReceived(patient)
+                            lblStatus.Text = $"GDT verarbeitet: {Path.GetFileName(gdtFile)}"
+                        End If
+                    Catch
+                        ' Fehler ignorieren
+                    End Try
+                Next
+            End If
+        Catch
+            ' Fehler ignorieren
+        End Try
+    End Sub
+    
+    Private Sub ProcessExistingGDTFiles()
+        Try
+            If Directory.Exists(gdtWatchFolder) Then
+                Dim backupFolder As String = Path.Combine(gdtWatchFolder, "Backup")
+                If Not Directory.Exists(backupFolder) Then
+                    Directory.CreateDirectory(backupFolder)
+                End If
+                
+                Dim gdtFiles() As String = Directory.GetFiles(gdtWatchFolder, gdtFilePattern, SearchOption.TopDirectoryOnly)
+                
+                For Each gdtFile As String In gdtFiles
+                    Try
+                        Dim backupFile As String = Path.Combine(backupFolder, 
+                            $"{DateTime.Now:yyyyMMdd_HHmmss}_{Path.GetFileName(gdtFile)}")
+                        File.Move(gdtFile, backupFile)
+                        
+                        Dim patient As GDTParser.GDTPatient = GDTParser.ParseGDTFile(backupFile)
+                        
+                        If patient IsNot Nothing Then
+                            OnGDTFileReceived(patient)
+                            lblStatus.Text = $"GDT verarbeitet: {Path.GetFileName(gdtFile)}"
+                        End If
+                    Catch ex As Exception
+                        MessageBox.Show($"Fehler: {ex.Message}")
+                    End Try
+                Next
+                
+                CleanupOldBackups(backupFolder, 7)
+            End If
+        Catch ex As Exception
+            MessageBox.Show($"Fehler: {ex.Message}")
+        End Try
+    End Sub
+    
+    Private Sub CleanupOldBackups(backupFolder As String, daysToKeep As Integer)
+        Try
+            Dim cutoffDate As DateTime = DateTime.Now.AddDays(-daysToKeep)
+            Dim backupFiles() As String = Directory.GetFiles(backupFolder, "*.gdt")
+
+            For Each filePath As String In backupFiles
+                If File.GetCreationTime(filePath) < cutoffDate Then
+                    File.Delete(filePath)
+                End If
+            Next
+        Catch
+            ' Fehler ignorieren
+        End Try
+    End Sub
+    
+    Private Sub OnGDTFileReceived(patient As GDTParser.GDTPatient)
+        If Me.InvokeRequired Then
+            Me.Invoke(New Action(Of GDTParser.GDTPatient)(AddressOf OnGDTFileReceived), patient)
+            Return
+        End If
+        
+        Try
+            NeuerPatientVonGDT(patient)
+        Catch ex As Exception
+            MessageBox.Show("Fehler beim Verarbeiten der GDT-Daten: " & ex.Message, "GDT-Fehler")
+        End Try
+    End Sub
+    
+    Private Sub NeuerPatientVonGDT(gdtPatient As GDTParser.GDTPatient)
+        Dim zimmerAuswahl As New FormZimmerAuswahl()
+        zimmerAuswahl.Text = $"Zimmer auswählen für {gdtPatient.VollName}"
+        
+        If zimmerAuswahl.ShowDialog() = DialogResult.OK Then
+            Try
+                Using conn As New SqlConnection(connectionString)
+                    conn.Open()
+                    Dim sql As String = "INSERT INTO PatientenAufrufe (PatientenID, Vorname, Nachname, Zimmer, Status) VALUES (@PatientenID, @Vorname, @Nachname, @Zimmer, 'Wartend')"
+                    Using cmd As New SqlCommand(sql, conn)
+                        cmd.Parameters.AddWithValue("@PatientenID", gdtPatient.PatientenID)
+                        cmd.Parameters.AddWithValue("@Vorname", If(String.IsNullOrEmpty(gdtPatient.Vorname), DBNull.Value, gdtPatient.Vorname))
+                        cmd.Parameters.AddWithValue("@Nachname", If(String.IsNullOrEmpty(gdtPatient.Name), DBNull.Value, gdtPatient.Name))
+                        cmd.Parameters.AddWithValue("@Zimmer", zimmerAuswahl.GewaehlterRaum)
+                        cmd.ExecuteNonQuery()
+                    End Using
+                End Using
+                
+                LoadPatientenListe()
+                lblStatus.Text = $"GDT-Patient {gdtPatient.VollName} hinzugefügt"
+                
+            Catch ex As Exception
+                MessageBox.Show("Fehler beim Hinzufügen des GDT-Patienten: " & ex.Message)
+            End Try
+        End If
+    End Sub
+    
+    Private Sub StartAutoRefresh()
+        autoRefreshTimer = New System.Windows.Forms.Timer()
+        autoRefreshTimer.Interval = autoRefreshInterval
+        AddHandler autoRefreshTimer.Tick, AddressOf AutoRefreshTimer_Tick
+        autoRefreshTimer.Start()
+    End Sub
+    
+    Private Sub AutoRefreshTimer_Tick(sender As Object, e As EventArgs)
+        Try
+            If Not dgvPatienten.Focused AndAlso dgvPatienten.SelectedRows.Count = 0 Then
+                LoadPatientenListe()
+            End If
+        Catch
+        End Try
+    End Sub
+
+    Private Sub InitializeDatabase()
+        Try
+            Using conn As New SqlConnection(masterConnectionString)
+                conn.Open()
+                
+                Dim checkDbSQL As String = "SELECT COUNT(*) FROM sys.databases WHERE name = 'PatientenAufruf'"
+                Using cmd As New SqlCommand(checkDbSQL, conn)
+                    Dim dbExists As Integer = Convert.ToInt32(cmd.ExecuteScalar())
+                    
+                    If dbExists = 0 Then
+                        Dim createDbSQL As String = "CREATE DATABASE PatientenAufruf"
+                        Using createCmd As New SqlCommand(createDbSQL, conn)
+                            createCmd.ExecuteNonQuery()
+                        End Using
+                    End If
+                End Using
+            End Using
+            
+            Using conn As New SqlConnection(connectionString)
+                conn.Open()
+                
+                Dim createTableSQL As String = "
+                IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'PatientenAufrufe')
+                BEGIN
+                    CREATE TABLE PatientenAufrufe (
+                        ID int IDENTITY(1,1) PRIMARY KEY,
+                        PatientenID nvarchar(50) NOT NULL,
+                        Vorname nvarchar(100) NULL,
+                        Nachname nvarchar(100) NULL,
+                        Zimmer nvarchar(50) NOT NULL,
+                        Status nvarchar(20) NOT NULL DEFAULT 'Wartend',
+                        AufrufZeit datetime NULL,
+                        AbschlussZeit datetime NULL,
+                        Bemerkungen nvarchar(500) NULL,
+                        ErstelltAm datetime NOT NULL DEFAULT GETDATE()
+                    )
+                    
+                    CREATE INDEX IX_PatientenAufrufe_Status ON PatientenAufrufe(Status)
+                    CREATE INDEX IX_PatientenAufrufe_PatientenID ON PatientenAufrufe(PatientenID)
+                    CREATE INDEX IX_PatientenAufrufe_ErstelltAm ON PatientenAufrufe(ErstelltAm)
+                END
+                ELSE
+                BEGIN
+                    IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'PatientenAufrufe' AND COLUMN_NAME = 'Vorname')
+                        ALTER TABLE PatientenAufrufe ADD Vorname nvarchar(100) NULL
+                    
+                    IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'PatientenAufrufe' AND COLUMN_NAME = 'Nachname')
+                        ALTER TABLE PatientenAufrufe ADD Nachname nvarchar(100) NULL
+                        
+                    IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'PatientenAufrufe' AND COLUMN_NAME = 'AbschlussZeit')
+                        ALTER TABLE PatientenAufrufe ADD AbschlussZeit datetime NULL
+                        
+                    IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'PatientenAufrufe' AND COLUMN_NAME = 'Bemerkungen')
+                        ALTER TABLE PatientenAufrufe ADD Bemerkungen nvarchar(500) NULL
+                END"
+                
+                Using cmd As New SqlCommand(createTableSQL, conn)
+                    cmd.ExecuteNonQuery()
+                End Using
+                
+                lblStatus.Text = "Datenbank erfolgreich initialisiert"
+                lblStatus.ForeColor = Color.Green
+            End Using
+            
+        Catch ex As Exception
+            MessageBox.Show("Fehler bei Datenbankinitialisierung: " & ex.Message)
+            lblStatus.Text = "Datenbankfehler"
+            lblStatus.ForeColor = Color.Red
+        End Try
+    End Sub
+
+    Private Sub StartWebServer()
+        Try
+            httpListener = New HttpListener()
+            httpListener.Prefixes.Add("http://*:8080/")
+            httpListener.Start()
+            isListening = True
+            
+            listenerThread = New Thread(AddressOf ListenForRequests)
+            listenerThread.IsBackground = True
+            listenerThread.Start()
+            
+            lblWebServer.Text = "Web-Server läuft auf Port 8080"
+            lblWebServer.ForeColor = Color.Green
+            
+        Catch ex As Exception
+            MessageBox.Show("Fehler beim Starten des Web-Servers: " & ex.Message)
+            lblWebServer.Text = "Web-Server Fehler"
+            lblWebServer.ForeColor = Color.Red
+        End Try
+    End Sub
+
+    Private Sub ListenForRequests()
+        While isListening
+            Try
+                Dim context As HttpListenerContext = httpListener.GetContext()
+                Dim request As HttpListenerRequest = context.Request
+                Dim response As HttpListenerResponse = context.Response
+                
+                response.Headers.Add("Access-Control-Allow-Origin", "*")
+                response.Headers.Add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                response.Headers.Add("Access-Control-Allow-Headers", "Content-Type")
+                
+                Select Case request.Url.AbsolutePath.ToLower()
+                    Case "/api/aufrufe"
+                        HandleGetAufrufe(response)
+                    Case "/api/warteschlange"
+                        HandleGetWarteschlange(response)
+                    Case "/api/aufruf"
+                        If request.HttpMethod = "POST" Then
+                            HandlePostAufruf(request, response)
+                        End If
+                    Case "/api/status"
+                        HandleGetStatus(response)
+                    Case "/"
+                        HandleDisplayPage(response)
+                    Case "/management"
+                        HandleManagementPage(response)
+                    Case "/qr"
+                        HandleQRPage(response)
+                    Case Else
+                        If request.Url.AbsolutePath.ToLower().StartsWith("/mobile/") Then
+                            Dim patientID As String = request.Url.AbsolutePath.Substring(8)
+                            HandleMobilePage(response, patientID)
+                        Else
+                            response.StatusCode = 404
+                            SendResponse(response, "Seite nicht gefunden")
+                        End If
+                End Select
+                
+            Catch ex As ThreadAbortException
+                Exit While
+            Catch ex As Exception
+                Console.WriteLine("HTTP Listener Fehler: " & ex.Message)
+            End Try
+        End While
+    End Sub
+
+    Private Sub HandleGetAufrufe(response As HttpListenerResponse)
+        Try
+            Using conn As New SqlConnection(connectionString)
+                conn.Open()
+                Dim sql As String = "SELECT PatientenID, Zimmer, Status, AufrufZeit FROM PatientenAufrufe WHERE Status = 'Aufgerufen' ORDER BY AufrufZeit DESC"
+                Using cmd As New SqlCommand(sql, conn)
+                    Using reader As SqlDataReader = cmd.ExecuteReader()
+                        Dim aufrufe As New List(Of Object)
+                        
+                        While reader.Read()
+                            Dim aufruf As New With {
+                                .PatientenID = reader("PatientenID").ToString(),
+                                .Zimmer = reader("Zimmer").ToString(),
+                                .Status = reader("Status").ToString(),
+                                .AufrufZeit = If(IsDBNull(reader("AufrufZeit")), Nothing, reader("AufrufZeit"))
+                            }
+                            aufrufe.Add(aufruf)
+                        End While
+                        
+                        Dim json As String = JsonConvert.SerializeObject(aufrufe)
+                        SendJsonResponse(response, json)
+                    End Using
+                End Using
+            End Using
+        Catch ex As Exception
+            response.StatusCode = 500
+            SendResponse(response, "Fehler beim Laden der Aufrufe")
+        End Try
+    End Sub
+
+    Private Sub HandleGetWarteschlange(response As HttpListenerResponse)
+        Try
+            Using conn As New SqlConnection(connectionString)
+                conn.Open()
+                Dim sql As String = "SELECT * FROM PatientenAufrufe WHERE Status IN ('Wartend', 'Aufgerufen') ORDER BY ErstelltAm"
+                Using cmd As New SqlCommand(sql, conn)
+                    Using reader As SqlDataReader = cmd.ExecuteReader()
+                        Dim aufrufe As New List(Of PatientenAufruf)
+                        
+                        While reader.Read()
+                            aufrufe.Add(New PatientenAufruf With {
+                                .ID = reader("ID"),
+                                .PatientenID = reader("PatientenID").ToString(),
+                                .Vorname = If(IsDBNull(reader("Vorname")), "", reader("Vorname").ToString()),
+                                .Nachname = If(IsDBNull(reader("Nachname")), "", reader("Nachname").ToString()),
+                                .Zimmer = reader("Zimmer").ToString(),
+                                .Status = reader("Status").ToString(),
+                                .AufrufZeit = If(IsDBNull(reader("AufrufZeit")), Nothing, reader("AufrufZeit")),
+                                .ErstelltAm = reader("ErstelltAm")
+                            })
+                        End While
+                        
+                        Dim json As String = JsonConvert.SerializeObject(aufrufe)
+                        SendJsonResponse(response, json)
+                    End Using
+                End Using
+            End Using
+        Catch ex As Exception
+            response.StatusCode = 500
+            SendResponse(response, "Fehler beim Laden der Warteschlange")
+        End Try
+    End Sub
+
+    Private Sub HandlePostAufruf(request As HttpListenerRequest, response As HttpListenerResponse)
+        Try
+            Dim reader As New StreamReader(request.InputStream)
+            Dim jsonData As String = reader.ReadToEnd()
+            Dim data = JsonConvert.DeserializeObject(Of Dictionary(Of String, Object))(jsonData)
+            
+            If data.ContainsKey("id") AndAlso data.ContainsKey("action") Then
+                Dim patientId As Integer = Convert.ToInt32(data("id"))
+                Dim action As String = data("action").ToString()
+                
+                Using conn As New SqlConnection(connectionString)
+                    conn.Open()
+                    Dim sql As String = ""
+                    
+                    Select Case action.ToLower()
+                        Case "aufrufen"
+                            sql = "UPDATE PatientenAufrufe SET Status = 'Aufgerufen', AufrufZeit = GETDATE() WHERE ID = @ID"
+                        Case "abschliessen"
+                            sql = "UPDATE PatientenAufrufe SET Status = 'Abgeschlossen', AbschlussZeit = GETDATE() WHERE ID = @ID"
+                        Case "rueckgaengig"
+                            sql = "UPDATE PatientenAufrufe SET Status = 'Wartend', AufrufZeit = NULL WHERE ID = @ID"
+                    End Select
+                    
+                    If Not String.IsNullOrEmpty(sql) Then
+                        Using cmd As New SqlCommand(sql, conn)
+                            cmd.Parameters.AddWithValue("@ID", patientId)
+                            cmd.ExecuteNonQuery()
+                        End Using
+                    End If
+                End Using
+            End If
+            
+            response.StatusCode = 200
+            SendResponse(response, "OK")
+            
+        Catch ex As Exception
+            response.StatusCode = 500
+            SendResponse(response, "Fehler: " & ex.Message)
+        End Try
+    End Sub
+
+    Private Sub HandleGetStatus(response As HttpListenerResponse)
+        Dim status As String = "{ ""status"": ""online"", ""timestamp"": """ & DateTime.Now.ToString() & """ }"
+        SendJsonResponse(response, status)
+    End Sub
+
+    Private Sub HandleMobilePage(response As HttpListenerResponse, patientID As String)
+        Dim html As String = $"<!DOCTYPE html>
+<html lang='de'>
+<head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>Patient {patientID} - Status</title>
+    <style>
+        body {{ 
+            font-family: Arial, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }}
+        .patient-card {{
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+            max-width: 400px;
+            width: 90%;
+        }}
+        .patient-id {{
+            font-size: 48px;
+            font-weight: bold;
+            margin-bottom: 30px;
+            color: #fff;
+            background: rgba(255,255,255,0.2);
+            padding: 15px;
+            border-radius: 15px;
+        }}
+        .position-info {{
+            background: rgba(255,255,255,0.15);
+            padding: 20px;
+            border-radius: 15px;
+            margin: 20px 0;
+        }}
+        .position-number {{
+            font-size: 64px;
+            font-weight: bold;
+            color: #ffd700;
+            margin: 10px 0;
+        }}
+        .wartezeit {{
+            font-size: 20px;
+            color: #fff;
+            margin: 10px 0;
+        }}
+        .naechster-hinweis {{
+            background: rgba(255,165,0,0.4);
+            border: 2px solid #ffa500;
+            padding: 15px;
+            border-radius: 10px;
+            font-size: 20px;
+            font-weight: bold;
+            animation: pulse 2s infinite;
+            margin: 20px 0;
+        }}
+        .status {{
+            font-size: 24px;
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 10px;
+        }}
+        .status-wartend {{
+            background: rgba(255,193,7,0.3);
+            border: 2px solid #ffc107;
+        }}
+        .status-aufgerufen {{
+            background: rgba(220,53,69,0.3);
+            border: 2px solid #dc3545;
+            animation: pulse 2s infinite;
+        }}
+        .zimmer {{
+            font-size: 32px;
+            font-weight: bold;
+            margin: 20px 0;
+            padding: 20px;
+            background: rgba(40,167,69,0.3);
+            border: 2px solid #28a745;
+            border-radius: 10px;
+        }}
+        .refresh-btn {{
+            background: rgba(255,255,255,0.2);
+            border: 2px solid rgba(255,255,255,0.3);
+            color: white;
+            padding: 15px 30px;
+            border-radius: 25px;
+            font-size: 18px;
+            margin-top: 20px;
+            cursor: pointer;
+        }}
+        @keyframes pulse {{
+            0% {{ transform: scale(1); }}
+            50% {{ transform: scale(1.05); }}
+            100% {{ transform: scale(1); }}
+        }}
+        .not-found {{
+            color: #ff6b6b;
+            font-size: 20px;
+        }}
+    </style>
+</head>
+<body>
+    <div class='patient-card'>
+        <div class='patient-id'>Patient {patientID}</div>
+        <div id='content'>
+            <p>Lade aktuellen Status...</p>
+        </div>
+        <button class='refresh-btn' onclick='loadStatus()'>Status aktualisieren</button>
+    </div>
+
+    <script>
+        function loadStatus() {{
+            // Erst Warteschlange für Position abrufen
+            fetch('/api/warteschlange')
+                .then(response => response.json())
+                .then(warteschlange => {{
+                    // Dann aufgerufene Patienten abrufen
+                    return fetch('/api/aufrufe')
+                        .then(response => response.json())
+                        .then(aufrufe => ({{ warteschlange, aufrufe }}));
+                }})
+                .then(({{ warteschlange, aufrufe }}) => {{
+                    const content = document.getElementById('content');
+                    const aufgerufenerPatient = aufrufe.find(p => p.PatientenID === '{patientID}');
+                    
+                    if (aufgerufenerPatient) {{
+                        // Patient wurde aufgerufen
+                        content.innerHTML = `
+                            <div class='status status-aufgerufen'>
+                                🔔 JETZT AUFGERUFEN!
+                            </div>
+                            <div style='font-size: 18px; margin: 15px 0;'>Bitte begeben Sie sich sofort zu:</div>
+                            <div class='zimmer'>${{aufgerufenerPatient.Zimmer}}</div>
+                        `;
+                    }} else {{
+                        // Patient wartet noch - Position ermitteln
+                        const wartendePatient = warteschlange.find(p => p.PatientenID === '{patientID}');
+                        
+                        if (wartendePatient && wartendePatient.Status === 'Wartend') {{
+                            // Position in der Warteschlange berechnen
+                            const alleWartenden = warteschlange.filter(p => p.Status === 'Wartend');
+                            const position = alleWartenden.findIndex(p => p.PatientenID === '{patientID}') + 1;
+                            const geschaetzteMinuten = position * 10; // Annahme: 10 Minuten pro Patient
+                            
+                            let positionHtml = `
+                                <div class='position-info'>
+                                    <div>Ihre Position in der Warteschlange:</div>
+                                    <div class='position-number'>${{position}}</div>
+                                    <div class='wartezeit'>Geschätzte Wartezeit: ca. ${{geschaetzteMinuten}} Minuten</div>
+                                </div>
+                            `;
+                            
+                            // Prüfen ob Patient als nächstes dran ist
+                            if (position === 1) {{
+                                positionHtml += `
+                                    <div class='naechster-hinweis'>
+                                        ⚠️ Sie sind als Nächster an der Reihe!
+                                        <br>Bitte bleiben Sie in der Nähe.
+                                    </div>
+                                `;
+                            }} else if (position === 2) {{
+                                positionHtml += `
+                                    <div style='background: rgba(255,193,7,0.3); padding: 15px; border-radius: 10px; margin: 20px 0;'>
+                                        Sie sind übernächster Patient.
+                                        <br>Bitte halten Sie sich bereit.
+                                    </div>
+                                `;
+                            }}
+                            
+                            content.innerHTML = positionHtml + `
+                                <div style='margin-top: 20px; font-size: 16px; color: rgba(255,255,255,0.8);'>
+                                    Sie werden aufgerufen zu:<br>
+                                    <strong>${{wartendePatient.Zimmer}}</strong>
+                                </div>
+                            `;
+                        }} else if (wartendePatient && wartendePatient.Status === 'Aufgerufen') {{
+                            // Sonderfall: In Warteschlange als aufgerufen markiert, aber nicht in Aufrufe-Liste
+                            content.innerHTML = `
+                                <div class='status status-aufgerufen'>
+                                    🔔 SIE WURDEN AUFGERUFEN!
+                                </div>
+                                <div style='font-size: 18px; margin: 15px 0;'>Bitte begeben Sie sich zu:</div>
+                                <div class='zimmer'>${{wartendePatient.Zimmer}}</div>
+                            `;
+                        }} else {{
+                            content.innerHTML = `
+                                <div class='not-found'>
+                                    Sie sind nicht in der Warteschlange registriert.
+                                    <br><br>
+                                    Bitte melden Sie sich an der Anmeldung.
+                                </div>
+                            `;
+                        }}
+                    }}
+                }})
+                .catch(error => {{
+                    document.getElementById('content').innerHTML = `
+                        <div class='not-found'>
+                            Fehler beim Laden des Status
+                            <br><br>
+                            Bitte versuchen Sie es erneut.
+                        </div>
+                    `;
+                }});
+        }}
+        
+        setInterval(loadStatus, 3000);
+        loadStatus();
+    </script>
+</body>
+</html>"
+        
+        response.ContentType = "text/html; charset=utf-8"
+        SendResponse(response, html)
+    End Sub
+
+    Private Sub HandleManagementPage(response As HttpListenerResponse)
+        Dim html As String = "<!DOCTYPE html>" & vbCrLf &
+"<html lang='de'>" & vbCrLf &
+"<head>" & vbCrLf &
+"    <meta charset='UTF-8'>" & vbCrLf &
+"    <meta name='viewport' content='width=device-width, initial-scale=1.0'>" & vbCrLf &
+"    <title>Warteschlangen-Management</title>" & vbCrLf &
+"    <style>" & vbCrLf &
+"        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }" & vbCrLf &
+"        .header { text-align: center; color: #2c3e50; margin-bottom: 30px; }" & vbCrLf &
+"        .warteschlange { max-width: 1000px; margin: 0 auto; }" & vbCrLf &
+"        .patient-item { background: white; margin: 10px 0; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); display: flex; justify-content: space-between; align-items: center; }" & vbCrLf &
+"        .patient-info { flex-grow: 1; }" & vbCrLf &
+"        .patient-name { font-size: 18px; font-weight: bold; color: #2980b9; }" & vbCrLf &
+"        .patient-id { font-size: 14px; color: #7f8c8d; }" & vbCrLf &
+"        .zimmer { font-size: 16px; color: #27ae60; }" & vbCrLf &
+"        .status { padding: 5px 15px; border-radius: 20px; font-weight: bold; }" & vbCrLf &
+"        .status-wartend { background: #f39c12; color: white; }" & vbCrLf &
+"        .status-aufgerufen { background: #e74c3c; color: white; animation: blink 1s infinite; }" & vbCrLf &
+"        .actions button { margin: 0 5px; padding: 8px 15px; border: none; border-radius: 5px; cursor: pointer; }" & vbCrLf &
+"        .btn-aufrufen { background: #27ae60; color: white; }" & vbCrLf &
+"        .btn-abschliessen { background: #95a5a6; color: white; }" & vbCrLf &
+"        .btn-rueckgaengig { background: #e67e22; color: white; }" & vbCrLf &
+"        @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }" & vbCrLf &
+"    </style>" & vbCrLf &
+"</head>" & vbCrLf &
+"<body>" & vbCrLf &
+"    <div class='header'>" & vbCrLf &
+"        <h1>Warteschlangen-Management</h1>" & vbCrLf &
+"        <p>Übersicht aller wartenden und aufgerufenen Patienten</p>" & vbCrLf &
+"    </div>" & vbCrLf &
+"    <div id='warteschlange' class='warteschlange'>" & vbCrLf &
+"        <p>Lade Warteschlange...</p>" & vbCrLf &
+"    </div>" & vbCrLf &
+"    <script>" & vbCrLf &
+"        function ladeWarteschlange() {" & vbCrLf &
+"            fetch('/api/warteschlange')" & vbCrLf &
+"                .then(response => response.json())" & vbCrLf &
+"                .then(data => {" & vbCrLf &
+"                    const container = document.getElementById('warteschlange');" & vbCrLf &
+"                    if (data.length === 0) {" & vbCrLf &
+"                        container.innerHTML = '<p style=""text-align: center; color: #7f8c8d;"">Keine Patienten in der Warteschlange</p>';" & vbCrLf &
+"                        return;" & vbCrLf &
+"                    }" & vbCrLf &
+"                    container.innerHTML = data.map(patient => `" & vbCrLf &
+"                        <div class='patient-item'>" & vbCrLf &
+"                            <div class='patient-info'>" & vbCrLf &
+"                                <div class='patient-name'>${patient.Vorname} ${patient.Nachname}</div>" & vbCrLf &
+"                                <div class='patient-id'>ID: ${patient.PatientenID}</div>" & vbCrLf &
+"                                <div class='zimmer'>${patient.Zimmer}</div>" & vbCrLf &
+"                            </div>" & vbCrLf &
+"                            <div class='status status-${patient.Status.toLowerCase()}'>${patient.Status}</div>" & vbCrLf &
+"                            <div class='actions'>" & vbCrLf &
+"                                ${patient.Status === 'Wartend' ? " & vbCrLf &
+"                                  `<button class='btn-aufrufen' onclick='patientAufrufen(${patient.ID})'>Aufrufen</button>` : " & vbCrLf &
+"                                  patient.Status === 'Aufgerufen' ? " & vbCrLf &
+"                                  `<button class='btn-abschliessen' onclick='patientAbschliessen(${patient.ID})'>Abschließen</button>" & vbCrLf &
+"                                   <button class='btn-rueckgaengig' onclick='patientRueckgaengig(${patient.ID})'>Zurück</button>` :" & vbCrLf &
+"                                  `<span style='color: #95a5a6;'>Abgeschlossen</span>`" & vbCrLf &
+"                                }" & vbCrLf &
+"                            </div>" & vbCrLf &
+"                        </div>" & vbCrLf &
+"                    `).join('');" & vbCrLf &
+"                })" & vbCrLf &
+"                .catch(error => {" & vbCrLf &
+"                    console.error('Fehler:', error);" & vbCrLf &
+"                    document.getElementById('warteschlange').innerHTML = '<p style=""color: red;"">Fehler beim Laden</p>';" & vbCrLf &
+"                });" & vbCrLf &
+"        }" & vbCrLf &
+"        function patientAufrufen(id) {" & vbCrLf &
+"            fetch('/api/aufruf', {" & vbCrLf &
+"                method: 'POST'," & vbCrLf &
+"                headers: {'Content-Type': 'application/json'}," & vbCrLf &
+"                body: JSON.stringify({id: id, action: 'aufrufen'})" & vbCrLf &
+"            }).then(() => ladeWarteschlange());" & vbCrLf &
+"        }" & vbCrLf &
+"        function patientAbschliessen(id) {" & vbCrLf &
+"            fetch('/api/aufruf', {" & vbCrLf &
+"                method: 'POST'," & vbCrLf &
+"                headers: {'Content-Type': 'application/json'}," & vbCrLf &
+"                body: JSON.stringify({id: id, action: 'abschliessen'})" & vbCrLf &
+"            }).then(() => ladeWarteschlange());" & vbCrLf &
+"        }" & vbCrLf &
+"        function patientRueckgaengig(id) {" & vbCrLf &
+"            if (confirm('Aufruf wirklich rückgängig machen?')) {" & vbCrLf &
+"                fetch('/api/aufruf', {" & vbCrLf &
+"                    method: 'POST'," & vbCrLf &
+"                    headers: {'Content-Type': 'application/json'}," & vbCrLf &
+"                    body: JSON.stringify({id: id, action: 'rueckgaengig'})" & vbCrLf &
+"                }).then(() => ladeWarteschlange());" & vbCrLf &
+"            }" & vbCrLf &
+"        }" & vbCrLf &
+"        setInterval(ladeWarteschlange, 3000);" & vbCrLf &
+"        ladeWarteschlange();" & vbCrLf &
+"    </script>" & vbCrLf &
+"</body>" & vbCrLf &
+"</html>"
+        
+        response.ContentType = "text/html"
+        SendResponse(response, html)
+    End Sub
+    
+    Private Sub HandleQRPage(response As HttpListenerResponse)
+        ' HTML-Code gekürzt für Übersichtlichkeit
+        Dim html As String = "<!DOCTYPE html>..." ' Vollständiger HTML-Code wie vorher
+        response.ContentType = "text/html"
+        SendResponse(response, html)
+    End Sub
+
+    Private Sub HandleDisplayPage(response As HttpListenerResponse)
+        Dim html As String = "<!DOCTYPE html>" & vbCrLf &
+"<html lang='de'>" & vbCrLf &
+"<head>" & vbCrLf &
+"    <meta charset='UTF-8'>" & vbCrLf &
+"    <meta name='viewport' content='width=device-width, initial-scale=1.0'>" & vbCrLf &
+"    <title>Patientenaufrufe</title>" & vbCrLf &
+"    <style>" & vbCrLf &
+"        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f0f8ff; }" & vbCrLf &
+"        .header { text-align: center; color: #2c3e50; margin-bottom: 30px; }" & vbCrLf &
+"        .aufruf-liste { max-width: 800px; margin: 0 auto; }" & vbCrLf &
+"        .aufruf-item { background: white; margin: 10px 0; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); display: flex; justify-content: space-between; align-items: center; }" & vbCrLf &
+"        .patient-id { font-size: 24px; font-weight: bold; color: #2980b9; }" & vbCrLf &
+"        .zimmer { font-size: 20px; color: #27ae60; background: #ecf0f1; padding: 8px 15px; border-radius: 5px; }" & vbCrLf &
+"        .status-aufgerufen { border-left: 5px solid #e74c3c; animation: blink 1s infinite; }" & vbCrLf &
+"        @keyframes blink { 0% { background-color: white; } 50% { background-color: #ffebee; } 100% { background-color: white; } }" & vbCrLf &
+"        .zeit { color: #7f8c8d; font-size: 14px; }" & vbCrLf &
+"    </style>" & vbCrLf &
+"</head>" & vbCrLf &
+"<body>" & vbCrLf &
+"    <div class='header'>" & vbCrLf &
+"        <h1>Aktuelle Patientenaufrufe</h1>" & vbCrLf &
+"        <p>Bitte begeben Sie sich zum angezeigten Zimmer</p>" & vbCrLf &
+"    </div>" & vbCrLf &
+"    <div id='aufrufe' class='aufruf-liste'>" & vbCrLf &
+"        <p>Lade Aufrufe...</p>" & vbCrLf &
+"    </div>" & vbCrLf &
+"    <script>" & vbCrLf &
+"        function ladeAufrufe() {" & vbCrLf &
+"            fetch('/api/aufrufe')" & vbCrLf &
+"                .then(response => response.json())" & vbCrLf &
+"                .then(data => {" & vbCrLf &
+"                    const container = document.getElementById('aufrufe');" & vbCrLf &
+"                    if (data.length === 0) {" & vbCrLf &
+"                        container.innerHTML = '<p style=""text-align: center; color: #7f8c8d;"">Keine aktuellen Aufrufe</p>';" & vbCrLf &
+"                        return;" & vbCrLf &
+"                    }" & vbCrLf &
+"                    container.innerHTML = data.map(aufruf => `" & vbCrLf &
+"                        <div class='aufruf-item status-${aufruf.Status.toLowerCase()}'>" & vbCrLf &
+"                            <div>" & vbCrLf &
+"                                <div class='patient-id'>Patient ${aufruf.PatientenID}</div>" & vbCrLf &
+"                                <div class='zeit'>JETZT</div>" & vbCrLf &
+"                            </div>" & vbCrLf &
+"                            <div class='zimmer'>${aufruf.Zimmer}</div>" & vbCrLf &
+"                        </div>" & vbCrLf &
+"                    `).join('');" & vbCrLf &
+"                })" & vbCrLf &
+"                .catch(error => {" & vbCrLf &
+"                    console.error('Fehler:', error);" & vbCrLf &
+"                    document.getElementById('aufrufe').innerHTML = '<p style=""color: red;"">Fehler beim Laden</p>';" & vbCrLf &
+"                });" & vbCrLf &
+"        }" & vbCrLf &
+"        setInterval(ladeAufrufe, 2000);" & vbCrLf &
+"        ladeAufrufe();" & vbCrLf &
+"    </script>" & vbCrLf &
+"</body>" & vbCrLf &
+"</html>"
+        
+        response.ContentType = "text/html"
+        SendResponse(response, html)
+    End Sub
+
+    Private Sub SendJsonResponse(response As HttpListenerResponse, json As String)
+        response.ContentType = "application/json"
+        SendResponse(response, json)
+    End Sub
+
+    Private Sub SendResponse(response As HttpListenerResponse, content As String)
+        Dim buffer As Byte() = Encoding.UTF8.GetBytes(content)
+        response.ContentLength64 = buffer.Length
+        response.OutputStream.Write(buffer, 0, buffer.Length)
+        response.OutputStream.Close()
+    End Sub
+
+    Private Sub LoadPatientenListe()
+        Try
+            Using conn As New SqlConnection(connectionString)
+                conn.Open()
+                Dim selectedDate As Date = dtpDatum.Value.Date
+                Dim sql As String = "SELECT * FROM PatientenAufrufe WHERE CAST(ErstelltAm AS DATE) = @Datum ORDER BY ErstelltAm"
+                
+                Using cmd As New SqlCommand(sql, conn)
+                    cmd.Parameters.AddWithValue("@Datum", selectedDate)
+                    Using reader As SqlDataReader = cmd.ExecuteReader()
+                        Dim aufrufe As New List(Of Object)
+                        
+                        While reader.Read()
+                            Dim patient As New With {
+                                .ID = reader("ID"),
+                                .Anzeige = $"{If(IsDBNull(reader("Vorname")), "", reader("Vorname").ToString())} {If(IsDBNull(reader("Nachname")), "", reader("Nachname").ToString())} (ID: {reader("PatientenID")})".Trim(),
+                                .PatientenID = reader("PatientenID").ToString(),
+                                .Vorname = If(IsDBNull(reader("Vorname")), "", reader("Vorname").ToString()),
+                                .Nachname = If(IsDBNull(reader("Nachname")), "", reader("Nachname").ToString()),
+                                .Zimmer = reader("Zimmer").ToString(),
+                                .Status = reader("Status").ToString(),
+                                .ErstelltAm = reader("ErstelltAm"),
+                                .AufrufZeit = If(IsDBNull(reader("AufrufZeit")), Nothing, reader("AufrufZeit")),
+                                .AbschlussZeit = If(IsDBNull(reader("AbschlussZeit")), Nothing, reader("AbschlussZeit")),
+                                .Bemerkungen = If(IsDBNull(reader("Bemerkungen")), "", reader("Bemerkungen").ToString())
+                            }
+                            aufrufe.Add(patient)
+                        End While
+                        
+                        dgvPatienten.DataSource = aufrufe
+                        ConfigureGridColumns()
+                        
+                        lblStatus.Text = $"Anzeige für {selectedDate:dd.MM.yyyy} - {aufrufe.Count} Einträge"
+                    End Using
+                End Using
+            End Using
+        Catch ex As Exception
+            MessageBox.Show("Fehler beim Laden der Patientenliste: " & ex.Message)
+        End Try
+    End Sub
+    
+    Private Sub ConfigureGridColumns()
+        If dgvPatienten.Columns.Count > 0 Then
+            dgvPatienten.Columns("ID").Visible = False
+            dgvPatienten.Columns("PatientenID").Visible = False
+            dgvPatienten.Columns("Vorname").Visible = False
+            dgvPatienten.Columns("Nachname").Visible = False
+            
+            dgvPatienten.Columns("Anzeige").HeaderText = "Patient"
+            dgvPatienten.Columns("Anzeige").Width = 200
+            dgvPatienten.Columns("Anzeige").DisplayIndex = 0
+            
+            dgvPatienten.Columns("Zimmer").HeaderText = "Zimmer"
+            dgvPatienten.Columns("Zimmer").Width = 150
+            dgvPatienten.Columns("Zimmer").DisplayIndex = 1
+            
+            dgvPatienten.Columns("Status").HeaderText = "Status"
+            dgvPatienten.Columns("Status").Width = 100
+            dgvPatienten.Columns("Status").DisplayIndex = 2
+            
+            dgvPatienten.Columns("ErstelltAm").HeaderText = "Angemeldet"
+            dgvPatienten.Columns("ErstelltAm").Width = 120
+            dgvPatienten.Columns("ErstelltAm").DisplayIndex = 3
+            
+            dgvPatienten.Columns("AufrufZeit").HeaderText = "Aufgerufen"
+            dgvPatienten.Columns("AufrufZeit").Width = 120
+            dgvPatienten.Columns("AufrufZeit").DisplayIndex = 4
+            
+            dgvPatienten.Columns("AbschlussZeit").HeaderText = "Abgeschlossen"
+            dgvPatienten.Columns("AbschlussZeit").Width = 120
+            dgvPatienten.Columns("AbschlussZeit").DisplayIndex = 5
+            
+            dgvPatienten.Columns("Bemerkungen").HeaderText = "Bemerkungen"
+            dgvPatienten.Columns("Bemerkungen").Width = 200
+            dgvPatienten.Columns("Bemerkungen").DisplayIndex = 6
+        End If
+    End Sub
+
+    Public Sub NeuerPatient(patientenID As String, Optional vorname As String = "", Optional nachname As String = "")
+        Dim zimmerAuswahl As New FormZimmerAuswahl()
+        
+        If zimmerAuswahl.ShowDialog() = DialogResult.OK Then
+            Try
+                Using conn As New SqlConnection(connectionString)
+                    conn.Open()
+                    Dim sql As String = "INSERT INTO PatientenAufrufe (PatientenID, Vorname, Nachname, Zimmer, Status) VALUES (@PatientenID, @Vorname, @Nachname, @Zimmer, 'Wartend')"
+                    Using cmd As New SqlCommand(sql, conn)
+                        cmd.Parameters.AddWithValue("@PatientenID", patientenID)
+                        cmd.Parameters.AddWithValue("@Vorname", If(String.IsNullOrEmpty(vorname), DBNull.Value, vorname))
+                        cmd.Parameters.AddWithValue("@Nachname", If(String.IsNullOrEmpty(nachname), DBNull.Value, nachname))
+                        cmd.Parameters.AddWithValue("@Zimmer", zimmerAuswahl.GewaehlterRaum)
+                        cmd.ExecuteNonQuery()
+                    End Using
+                End Using
+                
+                LoadPatientenListe()
+                lblStatus.Text = $"Patient {patientenID} ({vorname} {nachname}) hinzugefügt"
+                
+            Catch ex As Exception
+                MessageBox.Show("Fehler beim Hinzufügen des Patienten: " & ex.Message)
+            End Try
+        End If
+    End Sub
+
+    Private Sub btnAufrufen_Click(sender As Object, e As EventArgs) Handles btnAufrufen.Click
+        If dgvPatienten.SelectedRows.Count > 0 Then
+            Dim selectedRow As DataGridViewRow = dgvPatienten.SelectedRows(0)
+            Dim patientID As Integer = selectedRow.Cells("ID").Value
+            
+            Try
+                Using conn As New SqlConnection(connectionString)
+                    conn.Open()
+                    Dim sql As String = "UPDATE PatientenAufrufe SET Status = 'Aufgerufen', AufrufZeit = GETDATE() WHERE ID = @ID"
+                    Using cmd As New SqlCommand(sql, conn)
+                        cmd.Parameters.AddWithValue("@ID", patientID)
+                        cmd.ExecuteNonQuery()
+                    End Using
+                End Using
+                
+                LoadPatientenListe()
+                lblStatus.Text = "Patient aufgerufen"
+                
+            Catch ex As Exception
+                MessageBox.Show("Fehler beim Aufrufen: " & ex.Message)
+            End Try
+        End If
+    End Sub
+
+    Private Sub btnAbgeschlossen_Click(sender As Object, e As EventArgs) Handles btnAbgeschlossen.Click
+        If dgvPatienten.SelectedRows.Count > 0 Then
+            Dim selectedRow As DataGridViewRow = dgvPatienten.SelectedRows(0)
+            Dim patientID As Integer = selectedRow.Cells("ID").Value
+            
+            Try
+                Using conn As New SqlConnection(connectionString)
+                    conn.Open()
+                    Dim sql As String = "UPDATE PatientenAufrufe SET Status = 'Abgeschlossen', AbschlussZeit = GETDATE() WHERE ID = @ID"
+                    Using cmd As New SqlCommand(sql, conn)
+                        cmd.Parameters.AddWithValue("@ID", patientID)
+                        cmd.ExecuteNonQuery()
+                    End Using
+                End Using
+                
+                LoadPatientenListe()
+                lblStatus.Text = "Patient abgeschlossen"
+                
+            Catch ex As Exception
+                MessageBox.Show("Fehler beim Abschließen: " & ex.Message)
+            End Try
+        End If
+    End Sub
+
+    Private Sub btnTestPatient_Click(sender As Object, e As EventArgs) Handles btnTestPatient.Click
+        If Not String.IsNullOrEmpty(txtTestPatientID.Text) Then
+            NeuerPatient(txtTestPatientID.Text)
+            Dim random As New Random()
+            txtTestPatientID.Text = "TEST" & random.Next(100, 999).ToString()
+        End If
+    End Sub
+
+    Private Sub btnQRAnzeige_Click(sender As Object, e As EventArgs) Handles btnQRAnzeige.Click
+        Try
+            If qrAnzeigeForm Is Nothing OrElse qrAnzeigeForm.IsDisposed Then
+                qrAnzeigeForm = New FormQRAnzeige()
+                Dim qrBaseUrl As String = If(useExternalUrl, externalBaseUrl, internalServerUrl)
+                qrAnzeigeForm.SetServerUrl(qrBaseUrl)
+            End If
+            
+            If qrAnzeigeForm.Visible Then
+                qrAnzeigeForm.BringToFront()
+            Else
+                qrAnzeigeForm.Show()
+            End If
+        Catch ex As Exception
+            Try
+                qrAnzeigeForm = New FormQRAnzeige()
+                Dim qrBaseUrl As String = If(useExternalUrl, externalBaseUrl, internalServerUrl)
+                qrAnzeigeForm.SetServerUrl(qrBaseUrl)
+                qrAnzeigeForm.Show()
+            Catch ex2 As Exception
+                MessageBox.Show("Fehler beim Öffnen der QR-Anzeige: " & ex2.Message)
+            End Try
+        End Try
+    End Sub
+
+    Private Sub btnPatientQR_Click(sender As Object, e As EventArgs) Handles btnPatientQR.Click
+        If dgvPatienten.SelectedRows.Count > 0 Then
+            Dim selectedRow As DataGridViewRow = dgvPatienten.SelectedRows(0)
+            Dim patientID As String = selectedRow.Cells("PatientenID").Value.ToString()
+            
+            Try
+                If qrAnzeigeForm Is Nothing OrElse qrAnzeigeForm.IsDisposed Then
+                    qrAnzeigeForm = New FormQRAnzeige()
+                    Dim qrBaseUrl As String = If(useExternalUrl, externalBaseUrl, internalServerUrl)
+                    qrAnzeigeForm.SetServerUrl(qrBaseUrl)
+                End If
+                
+                qrAnzeigeForm.ShowPatientQR(patientID)
+                qrAnzeigeForm.Show()
+                qrAnzeigeForm.BringToFront()
+                
+            Catch ex As Exception
+                Try
+                    qrAnzeigeForm = New FormQRAnzeige()
+                    Dim qrBaseUrl As String = If(useExternalUrl, externalBaseUrl, internalServerUrl)
+                    qrAnzeigeForm.SetServerUrl(qrBaseUrl)
+                    qrAnzeigeForm.ShowPatientQR(patientID)
+                    qrAnzeigeForm.Show()
+                Catch ex2 As Exception
+                    MessageBox.Show("Fehler beim Generieren des QR-Codes: " & ex2.Message)
+                End Try
+            End Try
+        Else
+            MessageBox.Show("Bitte wählen Sie einen Patienten aus der Liste aus.", "Patient auswählen", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+        End If
+    End Sub
+
+    Private Sub btnZimmerAendern_Click(sender As Object, e As EventArgs) Handles btnZimmerAendern.Click
+        If dgvPatienten.SelectedRows.Count > 0 Then
+            Dim selectedRow As DataGridViewRow = dgvPatienten.SelectedRows(0)
+            Dim patientID As Integer = selectedRow.Cells("ID").Value
+            Dim patientName As String = selectedRow.Cells("Anzeige").Value.ToString()
+            Dim currentZimmer As String = selectedRow.Cells("Zimmer").Value.ToString()
+            
+            Dim zimmerAuswahl As New FormZimmerAuswahl()
+            zimmerAuswahl.Text = $"Zimmer ändern für {patientName}"
+            
+            If zimmerAuswahl.ShowDialog() = DialogResult.OK Then
+                Try
+                    Using conn As New SqlConnection(connectionString)
+                        conn.Open()
+                        Dim sql As String = "UPDATE PatientenAufrufe SET Zimmer = @Zimmer, Status = 'Wartend', AufrufZeit = NULL WHERE ID = @ID"
+                        Using cmd As New SqlCommand(sql, conn)
+                            cmd.Parameters.AddWithValue("@ID", patientID)
+                            cmd.Parameters.AddWithValue("@Zimmer", zimmerAuswahl.GewaehlterRaum)
+                            cmd.ExecuteNonQuery()
+                        End Using
+                    End Using
+                    
+                    LoadPatientenListe()
+                    lblStatus.Text = $"Zimmer geändert: {currentZimmer} → {zimmerAuswahl.GewaehlterRaum}"
+                    
+                Catch ex As Exception
+                    MessageBox.Show("Fehler beim Ändern des Zimmers: " & ex.Message)
+                End Try
+            End If
+        Else
+            MessageBox.Show("Bitte wählen Sie einen Patienten aus der Liste aus.", "Patient auswählen", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+        End If
+    End Sub
+
+    Private Sub btnAufrufRueckgaengig_Click(sender As Object, e As EventArgs) Handles btnAufrufRueckgaengig.Click
+        If dgvPatienten.SelectedRows.Count > 0 Then
+            Dim selectedRow As DataGridViewRow = dgvPatienten.SelectedRows(0)
+            Dim patientID As Integer = selectedRow.Cells("ID").Value
+            Dim patientName As String = selectedRow.Cells("Anzeige").Value.ToString()
+            Dim currentStatus As String = selectedRow.Cells("Status").Value.ToString()
+            
+            If currentStatus = "Aufgerufen" Then
+                Dim result As DialogResult = MessageBox.Show(
+                    $"Möchten Sie den Aufruf für {patientName} rückgängig machen?" & vbCrLf & vbCrLf &
+                    "Der Patient wird wieder in den Status 'Wartend' versetzt.",
+                    "Aufruf rückgängig machen",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question)
+                
+                If result = DialogResult.Yes Then
+                    Try
+                        Using conn As New SqlConnection(connectionString)
+                            conn.Open()
+                            Dim sql As String = "UPDATE PatientenAufrufe SET Status = 'Wartend', AufrufZeit = NULL WHERE ID = @ID"
+                            Using cmd As New SqlCommand(sql, conn)
+                                cmd.Parameters.AddWithValue("@ID", patientID)
+                                cmd.ExecuteNonQuery()
+                            End Using
+                        End Using
+                        
+                        LoadPatientenListe()
+                        lblStatus.Text = $"Aufruf rückgängig gemacht für {patientName}"
+                        
+                    Catch ex As Exception
+                        MessageBox.Show("Fehler beim Rückgängigmachen des Aufrufs: " & ex.Message)
+                    End Try
+                End If
+            Else
+                MessageBox.Show($"Patient {patientName} ist aktuell {currentStatus.ToLower()}." & vbCrLf &
+                              "Nur aufgerufene Patienten können zurückgesetzt werden.",
+                              "Nicht möglich", MessageBoxButtons.OK, MessageBoxIcon.Information)
+            End If
+        Else
+            MessageBox.Show("Bitte wählen Sie einen Patienten aus der Liste aus.", "Patient auswählen", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+        End If
+    End Sub
+
+    Private Sub btnBemerkung_Click(sender As Object, e As EventArgs) Handles btnBemerkung.Click
+        If dgvPatienten.SelectedRows.Count > 0 Then
+            Dim selectedRow As DataGridViewRow = dgvPatienten.SelectedRows(0)
+            Dim patientID As Integer = selectedRow.Cells("ID").Value
+            Dim patientName As String = selectedRow.Cells("Anzeige").Value.ToString()
+            Dim currentBemerkung As String = If(selectedRow.Cells("Bemerkungen").Value Is Nothing, "", selectedRow.Cells("Bemerkungen").Value.ToString())
+            
+            Dim bemerkung As String = InputBox($"Bemerkung für {patientName}:", "Bemerkung bearbeiten", currentBemerkung)
+            
+            If bemerkung IsNot Nothing Then
+                Try
+                    Using conn As New SqlConnection(connectionString)
+                        conn.Open()
+                        Dim sql As String = "UPDATE PatientenAufrufe SET Bemerkungen = @Bemerkungen WHERE ID = @ID"
+                        Using cmd As New SqlCommand(sql, conn)
+                            cmd.Parameters.AddWithValue("@ID", patientID)
+                            cmd.Parameters.AddWithValue("@Bemerkungen", If(String.IsNullOrEmpty(bemerkung), DBNull.Value, bemerkung))
+                            cmd.ExecuteNonQuery()
+                        End Using
+                    End Using
+                    
+                    LoadPatientenListe()
+                    lblStatus.Text = "Bemerkung gespeichert"
+                    
+                Catch ex As Exception
+                    MessageBox.Show("Fehler beim Speichern der Bemerkung: " & ex.Message)
+                End Try
+            End If
+        Else
+            MessageBox.Show("Bitte wählen Sie einen Patienten aus der Liste aus.", "Patient auswählen", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+        End If
+    End Sub
+    
+    Private Sub btnLoeschen_Click(sender As Object, e As EventArgs) Handles btnLoeschen.Click
+        If dgvPatienten.SelectedRows.Count > 0 Then
+            Dim selectedRow As DataGridViewRow = dgvPatienten.SelectedRows(0)
+            Dim patientID As Integer = selectedRow.Cells("ID").Value
+            Dim patientName As String = selectedRow.Cells("Anzeige").Value.ToString()
+            
+            Dim result As DialogResult = MessageBox.Show(
+                $"Möchten Sie den Eintrag für {patientName} wirklich löschen?" & vbCrLf & vbCrLf &
+                "Diese Aktion kann nicht rückgängig gemacht werden.",
+                "Eintrag löschen",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning)
+            
+            If result = DialogResult.Yes Then
+                Try
+                    Using conn As New SqlConnection(connectionString)
+                        conn.Open()
+                        Dim sql As String = "DELETE FROM PatientenAufrufe WHERE ID = @ID"
+                        Using cmd As New SqlCommand(sql, conn)
+                            cmd.Parameters.AddWithValue("@ID", patientID)
+                            cmd.ExecuteNonQuery()
+                        End Using
+                    End Using
+                    
+                    LoadPatientenListe()
+                    lblStatus.Text = $"Eintrag gelöscht: {patientName}"
+                    
+                Catch ex As Exception
+                    MessageBox.Show("Fehler beim Löschen: " & ex.Message)
+                End Try
+            End If
+        Else
+            MessageBox.Show("Bitte wählen Sie einen Eintrag zum Löschen aus.", 
+                          "Kein Eintrag ausgewählt", 
+                          MessageBoxButtons.OK, 
+                          MessageBoxIcon.Information)
+        End If
+    End Sub
+    
+    Private Sub dtpDatum_ValueChanged(sender As Object, e As EventArgs) Handles dtpDatum.ValueChanged
+        LoadPatientenListe()
+    End Sub
+
+    Private Sub btnAnzeigeTesten_Click(sender As Object, e As EventArgs) Handles btnAnzeigeTesten.Click
+        Try
+            Process.Start("http://localhost:8080/")
+        Catch ex As Exception
+            MessageBox.Show("Fehler beim Öffnen des Browsers: " & ex.Message)
+        End Try
+    End Sub
+
+    Private Sub btnEinstellungen_Click(sender As Object, e As EventArgs) Handles btnEinstellungen.Click
+        MessageBox.Show("💻 System-Konfiguration" & vbCrLf & vbCrLf &
+                       "🌐 Interne URL: " & internalServerUrl & vbCrLf &
+                       "🔗 Externe URL: " & externalBaseUrl & vbCrLf &
+                       "🔄 Auto-Refresh: " & (autoRefreshInterval / 1000) & " Sekunden" & vbCrLf &
+                       "🔧 Externe URL aktiv: " & useExternalUrl.ToString() & vbCrLf & vbCrLf &
+                       "ℹ️ Erweiterte Einstellungen werden in einer" & vbCrLf &
+                       "   zukünftigen Version verfügbar sein.",
+                       "Aktuelle Konfiguration", MessageBoxButtons.OK, MessageBoxIcon.Information)
+    End Sub
+
+    Private Sub ServerKonfigurationToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles ServerKonfigurationToolStripMenuItem.Click
+        btnEinstellungen_Click(sender, e)
+    End Sub
+
+    Private Sub ZimmerVerwaltungToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles ZimmerVerwaltungToolStripMenuItem.Click
+        MessageBox.Show("Zimmer-Verwaltung wird in einer zukünftigen Version verfügbar sein.", "Information")
+    End Sub
+
+    Private Sub InfoToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles InfoToolStripMenuItem.Click
+        MessageBox.Show("Patienten-Aufrufsystem v1.0" & vbCrLf & vbCrLf & 
+                       "DSGVO-konformes Aufrufsystem für Arztpraxen" & vbCrLf & 
+                       "Entwickelt mit VB.NET" & vbCrLf & vbCrLf & 
+                       "Features:" & vbCrLf & 
+                       "• QR-Code basierte Patientenaufrufe" & vbCrLf & 
+                       "• Web-basierte Anzeige" & vbCrLf & 
+                       "• Mobile Smartphone-Unterstützung" & vbCrLf & 
+                       "• Warteschlangen-Positionen" & vbCrLf & 
+                       "• Medical Office Integration", 
+                       "Über das Programm", MessageBoxButtons.OK, MessageBoxIcon.Information)
+    End Sub
+
+    Private Sub FormPatientenAufruf_FormClosing(sender As Object, e As FormClosingEventArgs) Handles MyBase.FormClosing
+        isListening = False
+        
+        If autoRefreshTimer IsNot Nothing Then
+            autoRefreshTimer.Stop()
+            autoRefreshTimer.Dispose()
+        End If
+        
+        If gdtCheckTimer IsNot Nothing Then
+            gdtCheckTimer.Stop()
+            gdtCheckTimer.Dispose()
+        End If
+        
+        If httpListener IsNot Nothing Then
+            httpListener.Stop()
+            httpListener.Close()
+        End If
+        If listenerThread IsNot Nothing Then
+            listenerThread.Abort()
+        End If
+    End Sub
+    
+    Public Shared Sub Main(args() As String)
+        ' Single-Instance-Prüfung mit WindowsFormsApplicationBase
+        Dim controller As New SingleInstance.SingleInstanceController()
+        controller.SetCommandLineArgs(args)
+        controller.Run(args)
+    End Sub
+    
+    ' Alternative einfachere Methode mit Mutex (falls die obige Probleme macht):
+    Public Shared Sub MainAlternative(args() As String)
+        Application.EnableVisualStyles()
+        Application.SetCompatibleTextRenderingDefault(False)
+        
+        ' Prüfen ob erste Instanz
+        If SingleInstance.MutexManager.IsFirstInstance() Then
+            ' Erste Instanz - normal starten
+            Dim form As New FormPatientenAufruf()
+            
+            ' Parameter verarbeiten
+            If args.Length > 0 Then
+                Dim patientenID As String = ""
+                Dim vorname As String = ""
+                Dim nachname As String = ""
+                
+                For i As Integer = 0 To args.Length - 1
+                    Select Case args(i).ToLower()
+                        Case "-patient"
+                            If i + 1 < args.Length Then patientenID = args(i + 1)
+                        Case "-vorname"
+                            If i + 1 < args.Length Then vorname = args(i + 1)
+                        Case "-nachname"
+                            If i + 1 < args.Length Then nachname = args(i + 1)
+                    End Select
+                Next
+                
+                If Not String.IsNullOrEmpty(patientenID) Then
+                    form.Show()
+                    Application.DoEvents()
+                    form.NeuerPatient(patientenID, vorname, nachname)
+                End If
+            End If
+            
+            Application.Run(form)
+            SingleInstance.MutexManager.ReleaseMutex()
+        Else
+            ' Zweite Instanz - erste aktivieren und Parameter übergeben
+            SingleInstance.MutexManager.FindAndActivateFirstInstance()
+            
+            ' Parameter an erste Instanz senden (über Named Pipe oder File)
+            If args.Length > 0 Then
+                SendArgsToFirstInstance(args)
+            End If
+        End If
+    End Sub
+    
+    Private Shared Sub SendArgsToFirstInstance(args() As String)
+        ' Einfache Lösung über temporäre Datei
+        Try
+            Dim tempFile As String = IO.Path.Combine(IO.Path.GetTempPath(), "PatientenAufruf_NewPatient.txt")
+            Dim content As String = String.Join("|", args)
+            IO.File.WriteAllText(tempFile, content)
+        Catch
+            ' Fehler ignorieren
+        End Try
+    End Sub
+End Class
