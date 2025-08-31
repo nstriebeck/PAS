@@ -1,5 +1,6 @@
 Imports System.IO
 Imports System.Text
+Imports PAS.GDTParser
 
 Public Class GDTParser
     ' GDT-Feldkennungen (die wichtigsten)
@@ -13,6 +14,24 @@ Public Class GDTParser
     Public Const GESCHLECHT As String = "3110"
     Public Const WOHNORT As String = "3106"
     Public Const STRASSE As String = "3107"
+
+    Public Class XMLPatient
+        Public Property PatientenID As String
+        Public Property ScheinID As String
+        Public Property Name As String
+        Public Property Nachname As String
+        Public Property Vorname As String
+        Public Property Geburtsdatum As Date?
+        Public Property Geschlecht As String
+        Public Property Strasse As String
+        Public Property PLZ As String
+        Public Property Ort As String
+        Public Property Ankunftszeit As DateTime
+        Public Property Status As String
+        Public Property Zimmer As String
+        Public Property Prioritaet As Integer
+        Public Property Bemerkung As String
+    End Class
 
     Public Class GDTPatient
         Public Property PatientenNummer As String
@@ -69,7 +88,60 @@ Public Class GDTParser
         End Property
     End Class
 
+    Public Shared Function ParseMedicalOfficeXML(xmlPath As String) As XMLPatient
+        Try
+            If Not File.Exists(xmlPath) Then Return Nothing
 
+            Dim doc = XDocument.Load(xmlPath)
+            Dim patient As New XMLPatient
+
+            ' Session für Schein-ID
+            Dim sessionElement = doc.Descendants("session").FirstOrDefault()
+            If sessionElement IsNot Nothing Then
+                Dim sessionParts = sessionElement.Value.Split("#"c)
+                If sessionParts.Length > 0 Then
+                    patient.ScheinID = sessionParts(0)  ' Neue Property in PatientInfo
+                    Logger.Debug($"ScheinID aus XML: {patient.ScheinID}")
+                End If
+            End If
+
+            ' Patientendaten
+            patient.PatientenID = doc.Descendants("patnr").FirstOrDefault()?.Value
+            Logger.Debug($"PatientenID aus XML: {patient.PatientenID}")
+
+            patient.Nachname = doc.Descendants("nachname").FirstOrDefault()?.Value
+            Logger.Debug($"Nachname aus XML: {patient.Nachname}")
+
+            patient.Vorname = doc.Descendants("vorname").FirstOrDefault()?.Value
+            Logger.Debug($"Vorname aus XML: {patient.Vorname}")
+
+            patient.Name = $"{patient.Nachname}, {patient.Vorname}"
+            Logger.Debug($"Name gesetzt: {patient.Name}")
+
+            ' Geburtsdatum parsen (Format: YYYYMMDD)
+            Dim gebString = doc.Descendants("geburtstag").FirstOrDefault()?.Value
+            If gebString?.Length = 8 Then
+                Dim jahr = gebString.Substring(0, 4)
+                Dim monat = gebString.Substring(4, 2)
+                Dim tag = gebString.Substring(6, 2)
+                patient.Geburtsdatum = New DateTime(CInt(jahr), CInt(monat), CInt(tag))
+                Logger.Debug($"Geburtsdatum gesetzt: {patient.Geburtsdatum}")
+            End If
+
+            ' Weitere Felder
+            patient.Ankunftszeit = DateTime.Now
+            patient.Status = "Wartend"
+            patient.Zimmer = "Wartezimmer"
+            patient.Prioritaet = 0
+            patient.Bemerkung = ""
+
+            Return patient
+
+        Catch ex As Exception
+            Logger.Debug($"XML-Parse-Fehler: {ex.Message}")
+            Return Nothing
+        End Try
+    End Function
     ''' <summary>
     ''' Parst eine GDT-Datei und extrahiert Patientendaten
     ''' </summary>
@@ -305,5 +377,10 @@ Public Module GDTUmlautConverter
             Return ConvertUmlaute(text, Not fromGDT)
         End Try
     End Function
+
+
+
+
+
 
 End Module

@@ -3,6 +3,47 @@ Imports System.Data.SqlClient
 Imports System.Net.Http
 Imports Newtonsoft.Json
 
+' Struktur für Bereiche/Zimmer
+Public Class Bereich
+    Public Property ID As Integer
+    Public Property Bezeichnung As String
+    Public Property Typ As String
+    Public Property Aktiv As Boolean
+    Public Property Reihenfolge As Integer
+End Class
+
+' Struktur für Patientendaten
+Public Class PatientInfo
+    Public Property PatientenID As String
+    Public Property ScheinID As String
+    Public Property Name As String
+    Public Property Vorname As String
+    Public Property Nachname As String
+    Public Property Geburtsdatum As String
+    Public Property Ankunftszeit As DateTime
+    Public Property Zimmer As String
+    Public Property Status As String
+    Public Property Prioritaet As Integer
+    Public Property Bemerkung As String
+    Public Property Wartezeit As Integer ' NEU - in Minuten
+End Class
+
+' Klasse für Historie-Einträge
+Public Class HistorieEintrag
+    Public Property PatientenID As String
+    Public Property ScheinID As String
+    Public Property Name As String
+    Public Property Geburtsdatum As String
+    Public Property Ankunftszeit As DateTime
+    Public Property AufrufZeit As DateTime?
+    Public Property BehandlungStart As DateTime?
+    Public Property BehandlungEnde As DateTime?
+    Public Property Wartezeit As Integer
+    Public Property Zimmer As String
+    Public Property Bemerkung As String
+    Public Property Mitarbeiter As String
+End Class
+
 Public Module ConfigModule
     ' Zentrale Datenbank-Konfiguration
     Public ReadOnly Property SqlConnectionString As String

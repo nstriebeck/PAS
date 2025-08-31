@@ -6,9 +6,15 @@ Imports System.IO
 Imports System.Configuration
 
 Public Class FormPAS
+    Public Property GridManager As PatientenGridManager
+    Public Property BereicheManager As BereicheManager
+    Public Property ServerComm As ServerKommunikation
+    Public Property UpdateManager As UpdateManager
 
     Private tagesMitDaten As New Dictionary(Of Date, Integer) ' Datum -> Anzahl Patienten
     Private isUpdating As Boolean = False
+
+    Public Property IsBlinking As Boolean = False  ' Für Blink-Effekt
 
     Private blinkState As Boolean = False
     Private WithEvents timerNotfallBlink As New Timer()
@@ -16,38 +22,30 @@ Public Class FormPAS
     Private lastNotfallSound As DateTime = DateTime.MinValue
     Private notfallSoundEnabled As Boolean = True
 
-    ' Bereiche-Liste als Klassenvariable deklarieren
+    ' Controls die andere Klassen brauchen
+    Public ReadOnly Property PatientenGrid As DataGridView
+        Get
+            Return dgvPatienten
+        End Get
+    End Property
 
-    ' Struktur für Patientendaten
-    Public Class PatientInfo
-        Public Property PatientenID As String
-        Public Property Name As String
-        Public Property Ankunftszeit As DateTime
-        Public Property Status As String ' Wartend, Aufgerufen, InBehandlung, Fertig
-        Public Property Zimmer As String
-        Public Property Wartezeit As Integer ' in Minuten
-        Public Property Prioritaet As Integer ' 1=Normal, 2=Dringend, 3=Notfall
-        Public Property Bemerkung As String
-    End Class
-
-    ' Klasse für Historie-Einträge
-    Public Class HistorieEintrag
-        Public Property PatientenID As String
-        Public Property Name As String
-        Public Property Ankunftszeit As DateTime
-        Public Property AufrufZeit As DateTime?
-        Public Property BehandlungStart As DateTime?
-        Public Property BehandlungEnde As DateTime?
-        Public Property Wartezeit As Integer
-        Public Property Zimmer As String
-        Public Property Bemerkung As String
-        Public Property Mitarbeiter As String
-    End Class
+    Public ReadOnly Property StatusLabel As ToolStripStatusLabel
+        Get
+            Return lblStatus
+        End Get
+    End Property
 
     Private Async Sub FormPAS_Load(sender As Object, e As EventArgs) Handles MyBase.Load
+        GridManager = New PatientenGridManager(dgvPatienten, Me)
+        BereicheManager = New BereicheManager(TreeView1, Me)
+        ServerComm = New ServerKommunikation(Me)
+        UpdateManager = New UpdateManager(Me, GridManager, ServerComm)
+
+        ' Event-Handler registrieren
+        AddHandler GDTModule.NeuerGDTPatient, AddressOf NeuerPatientVonGDT
+        AddHandler GDTModule.NeuerXMLPatient, AddressOf NeuerPatientVonXML
 
         'Alarmsound
-
         Dim mnuSound As New ToolStripMenuItem("🔊 Alarm-Sound")
         mnuSound.Name = "mnuSound"
         AddHandler mnuSound.Click, AddressOf ToggleNotfallSound
@@ -57,10 +55,16 @@ Public Class FormPAS
         Await ConfigModule.LadeBereicheAsync()
 
         ' TreeView aufbauen
-        BuildBereicheTreeView() ' Mit ConfigModule.BereicheListe
+        BereicheManager.BuildBereicheTreeView() ' Mit ConfigModule.BereicheListe
 
 
-        InitializeGrid()
+        GridManager.InitializeGrid()
+
+        ' Selection-Farben transparent machen (HIER EINFÜGEN)
+        'dgvPatienten.DefaultCellStyle.SelectionBackColor = Color.Transparent
+        'dgvPatienten.DefaultCellStyle.SelectionForeColor = Color.Black
+        'dgvPatienten.RowHeadersDefaultCellStyle.SelectionBackColor = Color.Transparent
+
 
         DatabaseModule.MainForm = Me
 
@@ -72,7 +76,7 @@ Public Class FormPAS
         'InitializeTreeView()
 
         ' Erste Ladung
-        IntelligentesUpdate()
+        UpdateManager.IntelligentesUpdate()
 
         ' Zeit-Anzeige starten
         Dim timerZeit As New Timer()
@@ -114,7 +118,8 @@ Public Class FormPAS
     'Timer-Event für Blink-Effekt
     Private Sub timerNotfallBlink_Tick(sender As Object, e As EventArgs) Handles timerNotfallBlink.Tick
         blinkState = Not blinkState
-        Dim hatNotfall As Boolean = False
+
+        Dim hatNotfall As Boolean = False  ' <-- HIER DEKLARIEREN
 
         For Each row As DataGridViewRow In dgvPatienten.Rows
             If row.IsNewRow Then Continue For
@@ -123,23 +128,17 @@ Public Class FormPAS
             Dim status = row.Cells("Status").Value?.ToString()
 
             If prioritaet = 2 AndAlso (status = "Wartend" OrElse status = "Aufgerufen") Then
-                hatNotfall = True
-                ' Nur Hintergrund blinkt, Text bleibt konstant
+                hatNotfall = True  ' <-- HIER SETZEN
+
                 If blinkState Then
                     row.DefaultCellStyle.BackColor = Color.Red
+                    row.DefaultCellStyle.ForeColor = Color.White
                 Else
                     row.DefaultCellStyle.BackColor = Color.Yellow
+                    row.DefaultCellStyle.ForeColor = Color.Black
                 End If
-                ' Text-Formatierung bleibt konstant
-                row.DefaultCellStyle.ForeColor = Color.Black
-                row.DefaultCellStyle.Font = New Font(dgvPatienten.Font, FontStyle.Bold)
-
-                ' Prioritäts-Spalte extra hervorheben
-                row.Cells("Prioritaet").Style.ForeColor = Color.White
-                row.Cells("Prioritaet").Style.BackColor = Color.DarkRed
             End If
         Next
-
         ' Sound alle 30 Sekunden wenn Notfall vorhanden
         If hatNotfall AndAlso notfallSoundEnabled Then
             If DateTime.Now.Subtract(lastNotfallSound).TotalSeconds > 30 Then
@@ -153,21 +152,8 @@ Public Class FormPAS
         End If
     End Sub
 
-    ' Toggle-Button im Menü
-    'Private Sub btnToggleNotfallSound_Click(sender As Object, e As EventArgs) Handles btnToggleNotfallSound.Click
-    '    notfallSoundEnabled = Not notfallSoundEnabled
 
-    '    ' In DB speichern
-    '    Using conn As New SqlConnection(ConfigModule.SqlConnectionString)
-    '        conn.Open()
-    '        Dim cmd As New SqlCommand("UPDATE SystemConfig SET ConfigValue = @val WHERE ConfigKey = 'NotfallSound'", conn)
-    '        cmd.Parameters.AddWithValue("@val", If(notfallSoundEnabled, "1", "0"))
-    '        cmd.ExecuteNonQuery()
-    '    End Using
-
-    '    btnToggleNotfallSound.Text = If(notfallSoundEnabled, "🔊 Sound aus", "🔇 Sound ein")
-    'End Sub
-    '' Event-Handler ohne Handles-Klausel
+    ' Event-Handler ohne Handles-Klausel
     Private Sub ToggleNotfallSound(sender As Object, e As EventArgs)
         notfallSoundEnabled = Not notfallSoundEnabled
 
@@ -208,144 +194,6 @@ Public Class FormPAS
             Logger.Debug($"Fehler beim Laden der Bereiche: {ex.Message}")
         End Try
     End Function
-
-    Private Sub BuildBereicheTreeView()
-        Logger.Debug($"BuildBereicheTreeView aufgerufen, Anzahl Bereiche: {ConfigModule.BereicheListe.Count}")
-        TreeView1.Nodes.Clear()
-        TreeView1.CheckBoxes = True
-
-        ' Gruppiere nach eindeutigen Typen
-        Dim typenGruppen = ConfigModule.BereicheListe.
-        Where(Function(b) b.Aktiv).
-        GroupBy(Function(b) b.Typ).
-        OrderBy(Function(g) If(g.Key = "Sonstige", 0, If(g.Key = "Diagnostik", 1, 2)))
-
-        For Each gruppe In typenGruppen
-            ' Parent-Node für jeden Typ erstellen
-            Dim parentNode = TreeView1.Nodes.Add(gruppe.Key)
-
-            ' Alle Bereiche dieses Typs als Child-Nodes
-            For Each bereich In gruppe.OrderBy(Function(b) b.Reihenfolge)
-                Dim childNode = parentNode.Nodes.Add(bereich.Bezeichnung)
-                childNode.Checked = True
-                Logger.Debug($"Typ: {gruppe.Key}, Bereich: {bereich.Bezeichnung}")
-            Next
-
-            parentNode.Checked = True
-            parentNode.Expand()
-        Next
-
-        TreeView1.ExpandAll()
-    End Sub
-
-    Private Sub InitializeTreeView_OLD()
-        TreeView1.Nodes.Clear()
-        TreeView1.CheckBoxes = True
-
-        ' Hauptknoten für Filteroptionen
-        Dim nodeAnmeldung = TreeView1.Nodes.Add("Anmeldung")
-        nodeAnmeldung.Checked = True
-
-        Dim nodeLabor = TreeView1.Nodes.Add("Labor")
-        nodeLabor.Checked = True
-
-        Dim nodeRoentgen = TreeView1.Nodes.Add("Röntgen")
-        nodeRoentgen.Checked = True
-
-        Dim nodeZimmer = TreeView1.Nodes.Add("Behandlungszimmer")
-        nodeZimmer.Nodes.Add("Zimmer 1").Checked = True
-        nodeZimmer.Nodes.Add("Zimmer 2").Checked = True
-        nodeZimmer.Nodes.Add("Zimmer 3").Checked = True
-        nodeZimmer.ExpandAll()
-    End Sub
-
-    Private Sub InitializeGrid()
-        dgvPatienten.Columns.Clear()
-        dgvPatienten.AutoGenerateColumns = False
-        dgvPatienten.SelectionMode = DataGridViewSelectionMode.FullRowSelect
-        dgvPatienten.MultiSelect = False
-        dgvPatienten.AllowUserToAddRows = False
-
-        ' Spalten definieren
-        dgvPatienten.Columns.Add(New DataGridViewTextBoxColumn With {
-        .Name = "PatientenID",
-        .HeaderText = "Pat-Nr",
-        .Width = 70,
-        .ReadOnly = True
-    })
-        dgvPatienten.Columns.Add(New DataGridViewTextBoxColumn With {
-        .Name = "Name",
-        .HeaderText = "Name",
-        .Width = 150,
-        .ReadOnly = True
-    })
-        dgvPatienten.Columns.Add(New DataGridViewTextBoxColumn With {
-        .Name = "Ankunftszeit",
-        .HeaderText = "Ankunft",
-        .Width = 70,
-        .ReadOnly = True,
-        .DefaultCellStyle = New DataGridViewCellStyle With {.Format = "HH:mm"}
-    })
-        dgvPatienten.Columns.Add(New DataGridViewTextBoxColumn With {
-        .Name = "Wartezeit",
-        .HeaderText = "Wartet",
-        .Width = 60,
-        .ReadOnly = True
-    })
-        ' Zimmer-Spalte als normale TextBox statt ComboBox
-        dgvPatienten.Columns.Add(New DataGridViewTextBoxColumn With {
-    .Name = "Zimmer",
-    .HeaderText = "Zimmer",
-    .Width = 150,  ' Breiter für mehrere Einträge
-    .ReadOnly = True  ' Nur über Dialog bearbeitbar
-})
-
-        '    ' ComboBox für Zimmer - mit FlatStyle für bessere Farbdarstellung
-        '    Dim zimmerColumn As New DataGridViewComboBoxColumn With {
-        '    .Name = "Zimmer",
-        '    .HeaderText = "Zimmer",
-        '    .Width = 100,
-        '    .DisplayStyle = DataGridViewComboBoxDisplayStyle.Nothing, ' Zeigt Dropdown nur beim Klicken
-        '    .FlatStyle = FlatStyle.Flat, ' Wichtig für die Farbübernahme
-        '    .DataPropertyName = "Zimmer"
-        '}
-        '    zimmerColumn.Items.AddRange({"", "Anmeldung", "Wartezimmer", "Zimmer 1", "Zimmer 2", "Zimmer 3", "Labor", "Röntgen"})
-        '    dgvPatienten.Columns.Add(zimmerColumn)
-
-        ' Status
-        dgvPatienten.Columns.Add(New DataGridViewTextBoxColumn With {
-        .Name = "Status",
-        .HeaderText = "Status",
-        .Width = 100,
-        .ReadOnly = True
-    })
-
-        ' Priorität mit Text statt Zahl
-        dgvPatienten.Columns.Add(New DataGridViewTextBoxColumn With {
-        .Name = "Prioritaet",
-        .HeaderText = "Priorität",
-        .Width = 80,
-        .ReadOnly = True
-    })
-
-        ' Versteckte Spalte für Prioritäts-Wert (für Sortierung)
-        dgvPatienten.Columns.Add(New DataGridViewTextBoxColumn With {
-        .Name = "PrioritaetWert",
-        .HeaderText = "PrioWert",
-        .Width = 0,
-        .Visible = False
-    })
-
-        dgvPatienten.Columns.Add(New DataGridViewTextBoxColumn With {
-        .Name = "Bemerkung",
-        .HeaderText = "Bemerkung",
-        .Width = 150,
-        .ReadOnly = False
-    })
-
-        ' DataError Event Handler hinzufügen um ComboBox-Fehler abzufangen
-        AddHandler dgvPatienten.DataError, AddressOf dgvPatienten_DataError
-    End Sub
 
     ' Hilfsfunktion: Priorität-Zahl in Text umwandeln
     Private Function GetPrioritaetText(prioritaet As Integer) As String
@@ -438,15 +286,6 @@ Public Class FormPAS
         End Using
     End Sub
 
-    ' Hilfsfunktion: Triage-basierte Sortierung
-    Private Sub SortierePatienten()
-        Try
-            dgvPatienten.Sort(New PatientenComparer())
-        Catch ex As Exception
-            ' Fallback bei Fehler
-        End Try
-    End Sub
-
     Private Sub MonthCalendar1_DateChanged(sender As Object, e As DateRangeEventArgs) Handles MonthCalendar1.DateChanged
         Dim ausgewaehltesDatum As Date = e.Start.Date
 
@@ -477,13 +316,10 @@ Public Class FormPAS
             btnFertig.Enabled = True
             btnExport.Text = "Export"
 
-            ' Live-Daten laden
-            'IntelligentesUpdate()
-
             ' Sofort Daten laden und anzeigen (ERSETZT IntelligentesUpdate())
             Task.Run(Async Function()
                          Try
-                             Dim neueDaten = Await HoleDatenVomServer()
+                             Dim neueDaten = Await ServerComm.HoleDatenVomServer()
 
                              Me.Invoke(Sub()
                                            dgvPatienten.Rows.Clear()
@@ -502,7 +338,7 @@ Public Class FormPAS
                                                row.Cells("Bemerkung").Value = patient.Bemerkung
                                            Next
 
-                                           FaerbeZeilenNachStatus()
+                                           GridManager.FaerbeZeilenNachStatus()
                                            UpdateStatusBar()
                                        End Sub)
                          Catch ex As Exception
@@ -705,7 +541,7 @@ Public Class FormPAS
                 Next
 
                 ' Einmal zentral färben
-                FaerbeZeilenNachStatus()
+                GridManager.FaerbeZeilenNachStatus()
 
                 ' Statistik für geplante Termine
                 If termine.Count > 0 Then
@@ -842,210 +678,7 @@ Public Class FormPAS
         End Try
     End Function
 
-    ' Intelligente Update-Funktion
-    Private Async Sub IntelligentesUpdate()
-        Try
-            ' Neue Prüfung: Kommen wir von Planung/Historie?
-            Dim vonPlanungGekommen = False
-            If dgvPatienten.Rows.Count > 0 Then
-                For Each row As DataGridViewRow In dgvPatienten.Rows
-                    If Not row.IsNewRow AndAlso row.Cells("Status").Value?.ToString() = "Geplant" Then
-                        vonPlanungGekommen = True
-                        Exit For
-                    End If
-                Next
-            End If
-
-            If vonPlanungGekommen Then
-                dgvPatienten.Rows.Clear()  ' Alles löschen wenn von Planung kommend
-            End If
-            If dgvPatienten.IsCurrentCellInEditMode OrElse MouseButtons <> MouseButtons.None Then
-                Return
-            End If
-
-            Dim neueDaten = Await HoleDatenVomServer()
-            Dim aktuellePatientenIDs As New HashSet(Of String)
-
-            Dim existierendeZeilen As New Dictionary(Of String, DataGridViewRow)
-            For Each row As DataGridViewRow In dgvPatienten.Rows
-                If Not row.IsNewRow Then
-                    Dim patID = row.Cells("PatientenID").Value?.ToString()
-                    If Not String.IsNullOrEmpty(patID) Then
-                        existierendeZeilen(patID) = row
-                    End If
-                End If
-            Next
-
-            For Each patient In neueDaten
-                aktuellePatientenIDs.Add(patient.PatientenID)
-
-                If existierendeZeilen.ContainsKey(patient.PatientenID) Then
-                    Dim row = existierendeZeilen(patient.PatientenID)
-
-                    If row.Cells("Status").Value?.ToString() <> patient.Status Then
-                        row.Cells("Status").Value = patient.Status
-
-                        'Select Case patient.Status
-                        '    Case "Wartend"
-                        '        row.Cells("Status").Style.BackColor = Color.LightYellow
-                        '    Case "Aufgerufen"
-                        '        row.Cells("Status").Style.BackColor = Color.LightBlue
-                        '    Case "InBehandlung"
-                        '        row.Cells("Status").Style.BackColor = Color.LightGreen
-                        '    Case "Fertig"
-                        '        row.Cells("Status").Style.BackColor = Color.LightGray
-                        'End Select
-                    End If
-
-
-                    If Not row.Cells("Zimmer").IsInEditMode Then
-                        If row.Cells("Zimmer").Value?.ToString() <> patient.Zimmer Then
-                            row.Cells("Zimmer").Value = patient.Zimmer
-                        End If
-                    End If
-
-                    ' Wartezeit aktualisieren
-                    'Dim wartezeit = CInt(Math.Floor((DateTime.Now - patient.Ankunftszeit).TotalMinutes))
-                    'row.Cells("Wartezeit").Value = $"{wartezeit} min"
-
-                    ' Tatsächliche Wartezeit (seit Ankunft)
-                    Dim tatsaechlicheWartezeit = CInt(Math.Floor((DateTime.Now - patient.Ankunftszeit).TotalMinutes))
-
-                    ' Geschätzte Restwartezeit berechnen
-                    Dim geschaetzteRestzeit = BerechneWartezeit(row)
-
-                    ' Anzeige formatieren
-                    If patient.Status = "Wartend" Then
-                        row.Cells("Wartezeit").Value = $"{tatsaechlicheWartezeit} min (noch ca. {geschaetzteRestzeit} min)"
-                    Else
-                        row.Cells("Wartezeit").Value = $"{tatsaechlicheWartezeit} min"
-                    End If
-
-                    Logger.Debug($"Patient {patient.PatientenID}: Server-Priorität={patient.Prioritaet}, Grid-Priorität={row.Cells("PrioritaetWert").Value}")
-
-                    ' Priorität aktualisieren
-                    If row.Cells("PrioritaetWert").Value?.ToString() <> patient.Prioritaet.ToString() Then
-                        Logger.Debug($"Ändere Priorität von {row.Cells("PrioritaetWert").Value} auf {patient.Prioritaet}")
-                        row.Cells("PrioritaetWert").Value = patient.Prioritaet
-                        row.Cells("Prioritaet").Value = GetPrioritaetText(patient.Prioritaet)
-
-                        Select Case patient.Prioritaet
-                            Case 2 ' Notfall
-                                row.DefaultCellStyle.ForeColor = Color.Red
-                                row.DefaultCellStyle.Font = New Font(dgvPatienten.Font, FontStyle.Bold)
-        ' row.Cells("Prioritaet").Style.BackColor = Color.LightCoral  ' AUSKOMMENTIERT
-                            Case 1 ' Dringend
-                                row.DefaultCellStyle.ForeColor = Color.OrangeRed
-                                ' row.Cells("Prioritaet").Style.BackColor = Color.LightYellow  ' AUSKOMMENTIERT
-
-                            Case Else ' Normal
-                                row.DefaultCellStyle.ForeColor = Color.Black
-                                ' row.Cells("Prioritaet").Style.BackColor = Color.White  ' AUSKOMMENTIERT
-                        End Select
-                    End If
-
-                Else
-                    ' Neue Zeile hinzufügen
-                    Dim index = dgvPatienten.Rows.Add()
-                    Dim newRow = dgvPatienten.Rows(index)
-
-                    newRow.Cells("PatientenID").Value = patient.PatientenID
-                    newRow.Cells("Name").Value = patient.Name
-                    newRow.Cells("Ankunftszeit").Value = patient.Ankunftszeit
-                    newRow.Cells("Wartezeit").Value = $"{CInt(Math.Floor((DateTime.Now - patient.Ankunftszeit).TotalMinutes))} min"
-                    newRow.Cells("Zimmer").Value = patient.Zimmer
-                    newRow.Cells("Status").Value = patient.Status
-                    newRow.Cells("PrioritaetWert").Value = patient.Prioritaet
-                    newRow.Cells("Prioritaet").Value = GetPrioritaetText(patient.Prioritaet)
-                    newRow.Cells("Bemerkung").Value = patient.Bemerkung
-
-                    ' Status-Farbe
-                    'Select Case patient.Status
-                    '    Case "Wartend"
-                    '        newRow.Cells("Status").Style.BackColor = Color.LightYellow
-                    '    Case "Aufgerufen"
-                    '        newRow.Cells("Status").Style.BackColor = Color.LightBlue
-                    '    Case "InBehandlung"
-                    '        newRow.Cells("Status").Style.BackColor = Color.LightGreen
-                    'End Select
-
-                    ' Prioritäts-Formatierung
-                    Select Case patient.Prioritaet
-                        Case 2 ' Notfall
-                            newRow.DefaultCellStyle.ForeColor = Color.Red
-                            newRow.DefaultCellStyle.Font = New Font(dgvPatienten.Font, FontStyle.Bold)
-                            'newRow.Cells("Prioritaet").Style.BackColor = Color.LightCoral
-                        Case 1 ' Dringend
-                            newRow.DefaultCellStyle.ForeColor = Color.OrangeRed
-                            'newRow.Cells("Prioritaet").Style.BackColor = Color.LightYellow
-                        Case Else ' Normal
-                            newRow.DefaultCellStyle.ForeColor = Color.Black
-                            'newRow.Cells("Prioritaet").Style.BackColor = Color.White
-                    End Select
-
-                    ' Kurzes Highlight für neue Zeile (Fire-and-Forget ist hier beabsichtigt)
-                    newRow.DefaultCellStyle.BackColor = Color.LightGreen
-                    Dim unused1 = Task.Delay(2000).ContinueWith(Sub(t)
-                                                                    Me.Invoke(Sub()
-                                                                                  If newRow.Index >= 0 AndAlso newRow.Index < dgvPatienten.Rows.Count Then
-                                                                                      newRow.DefaultCellStyle.BackColor = Color.White
-                                                                                  End If
-                                                                              End Sub)
-                                                                End Sub)
-                End If
-            Next
-
-            ' Entfernte Patienten löschen
-            For i As Integer = dgvPatienten.Rows.Count - 1 To 0 Step -1
-                If Not dgvPatienten.Rows(i).IsNewRow Then
-                    Dim patID = dgvPatienten.Rows(i).Cells("PatientenID").Value?.ToString()
-
-                    ' Prüfen ob Patient gerade erst hinzugefügt wurde (z.B. innerhalb der letzten 10 Sekunden)
-                    Dim ankunftszeit = dgvPatienten.Rows(i).Cells("Ankunftszeit").Value
-                    If ankunftszeit IsNot Nothing Then
-                        Dim zeitDifferenz = DateTime.Now.Subtract(CDate(ankunftszeit)).TotalSeconds
-                        If zeitDifferenz < 10 Then
-                            Continue For ' Diesen Patienten noch nicht löschen
-                        End If
-                    End If
-
-                    If Not String.IsNullOrEmpty(patID) AndAlso Not aktuellePatientenIDs.Contains(patID) Then
-                        dgvPatienten.Rows.RemoveAt(i)
-                    End If
-                End If
-            Next
-
-            ' Nach Triage sortieren (Notfall > Dringend > Normal nach Zeit)
-            SortierePatienten()
-            'FaerbeZeilenNachStatus()
-            UpdateStatusBar()
-
-        Catch ex As Exception
-            Logger.Debug($"Update-Fehler: {ex.Message}")
-        End Try
-    End Sub
-
-    Private Async Function HoleDatenVomServer(Optional datum As Date? = Nothing) As Task(Of List(Of PatientInfo))
-        Try
-            ' Wenn kein Datum übergeben, verwende heute
-            Dim abfrageDatum = If(datum.HasValue, datum.Value, DateTime.Today)
-
-            Dim response = Await httpClient.GetAsync($"{serviceUrl}/api/warteschlange?datum={abfrageDatum:yyyy-MM-dd}")
-
-            If response.IsSuccessStatusCode Then
-                Dim json = Await response.Content.ReadAsStringAsync()
-                lblVerbindung.Text = "Verbindung: OK"
-                Return JsonConvert.DeserializeObject(Of List(Of PatientInfo))(json)
-            Else
-                lblVerbindung.Text = "Verbindung: Fehler"
-            End If
-        Catch ex As Exception
-            lblVerbindung.Text = "Verbindung: Fehler"
-        End Try
-        Return New List(Of PatientInfo)()
-    End Function
-
-    Private Sub UpdateStatusBar()
+    Public Sub UpdateStatusBar()
         Dim wartend = 0
         Dim inBehandlung = 0
 
@@ -1064,7 +697,7 @@ Public Class FormPAS
     End Sub
 
     Private Sub timerRefresh_Tick(sender As Object, e As EventArgs) Handles timerRefresh.Tick
-        IntelligentesUpdate()
+        UpdateManager.IntelligentesUpdate()
     End Sub
 
     ' Timer pausieren bei Benutzerinteraktion
@@ -1125,14 +758,25 @@ Public Class FormPAS
         Catch ex As Exception
             Logger.Debug($"Fehler beim Senden: {ex.Message}")
         End Try
-        FaerbeZeilenNachStatus()
+        GridManager.FaerbeZeilenNachStatus()
     End Sub
 
     Private Sub btnInBehandlung_Click(sender As Object, e As EventArgs) Handles btnInBehandlung.Click
         If dgvPatienten.CurrentRow IsNot Nothing Then
-            dgvPatienten.CurrentRow.Cells("Status").Value = "InBehandlung"
-            dgvPatienten.CurrentRow.Cells("Status").Style.BackColor = Color.LightGreen
-            FaerbeZeilenNachStatus()
+            Dim row = dgvPatienten.CurrentRow
+            Dim patientenID = row.Cells("PatientenID").Value?.ToString()
+
+            ' Status lokal setzen
+            row.Cells("Status").Value = "InBehandlung"
+            row.Cells("Status").Style.BackColor = Color.LightGreen
+
+            ' Status an Server senden
+            Task.Run(Async Function()
+                         Await ServerComm.StatusUpdate(patientenID, "InBehandlung", DateTime.Now)
+                         Return True
+                     End Function)
+
+            GridManager.FaerbeZeilenNachStatus()
         End If
     End Sub
 
@@ -1164,182 +808,30 @@ Public Class FormPAS
                 {"zeitpunkt", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}
             }
 
-                         Await httpClient.PostAsync($"{serviceUrl}/api/statusupdate", New FormUrlEncodedContent(statusValues))
-
-                         ' Statistik speichern (optional - nur wenn die Route existiert)
-                         'Dim statistikValues As New Dictionary(Of String, String) From {
-                         '    {"bereich", zimmer},
-                         '    {"prioritaet", prioritaet.ToString()},
-                         '    {"dauer", behandlungsDauer.ToString()}
-                         '}
-                         'Await httpClient.PostAsync($"{serviceUrl}/api/statistik", New FormUrlEncodedContent(statistikValues))
+                         Await ServerComm.StatusUpdate(patientenID, "Fertig", DateTime.Now)
 
                      Catch ex As Exception
                          Logger.Debug($"Fehler: {ex.Message}")
                      End Try
                      Return True
                  End Function)
-        FaerbeZeilenNachStatus()
-    End Sub    ' Neu-Button in Toolbar - öffnet Eingabeformular
+        GridManager.FaerbeZeilenNachStatus()
+    End Sub
+
+    ' Neu-Button in Toolbar - öffnet Eingabeformular
     Private Sub btnNeu_Click(sender As Object, e As EventArgs) Handles btnNeu.Click
         Using frm As New FormPatientEingabe()
             frm.IstBesucher = False
             frm.GewuenschtesDatum = MonthCalendar1.SelectionStart
             If frm.ShowDialog(Me) = DialogResult.OK Then
-                PatientManuellHinzufuegen(frm.PatientenID, frm.Vorname, frm.Nachname,
+                ServerComm.PatientManuellHinzufuegen(frm.PatientenID, frm.Vorname, frm.Nachname,
                                  frm.Prioritaet, frm.Bemerkung, frm.IstBesucher,
                                  frm.TerminZeit, frm.Zimmer)  ' <-- Zimmer hinzugefügt
             End If
         End Using
     End Sub
 
-    Private Sub PatientManuellHinzufuegen(patientenID As String, vorname As String, nachname As String,
-                                  prioritaet As Integer, bemerkung As String, istBesucher As Boolean,
-                                  terminZeit As DateTime, zimmer As String)  ' <-- zimmer hinzugefügt
-        Try
-            Dim patientName = If(String.IsNullOrWhiteSpace(vorname), nachname, $"{nachname}, {vorname}")
 
-            ' NEUE ZEILEN: Ankunftszeit basierend auf gewähltem Datum
-            Dim ankunftszeit As DateTime
-            If MonthCalendar1.SelectionStart.Date = DateTime.Today Then
-                ankunftszeit = DateTime.Now
-            Else
-                ' Für zukünftige/vergangene Termine: gewähltes Datum + aktuelle Uhrzeit
-                ankunftszeit = MonthCalendar1.SelectionStart.Date.Add(DateTime.Now.TimeOfDay)
-            End If
-
-            ' Neuen Patienten/Besucher zum Grid hinzufügen
-            Dim index = dgvPatienten.Rows.Add()
-            Dim newRow = dgvPatienten.Rows(index)
-
-            newRow.Cells("PatientenID").Value = patientenID
-            newRow.Cells("Name").Value = patientName
-            newRow.Cells("Ankunftszeit").Value = terminZeit  ' GEÄNDERT: terminZeit statt ankunftszeit 
-            newRow.Cells("Wartezeit").Value = "0 min"
-            newRow.Cells("Zimmer").Value = If(String.IsNullOrEmpty(zimmer),
-                                  If(istBesucher, "Anmeldung", "Wartezimmer"),
-                                  zimmer)
-            newRow.Cells("Status").Value = "Wartend"
-            newRow.Cells("PrioritaetWert").Value = prioritaet
-            newRow.Cells("Prioritaet").Value = GetPrioritaetText(prioritaet)
-            newRow.Cells("Bemerkung").Value = bemerkung
-
-            ' Status-Farbe
-            newRow.Cells("Status").Style.BackColor = Color.LightYellow
-
-            ' Prioritäts-Formatierung und Farben
-            ' Status-Farbe
-            newRow.Cells("Status").Style.BackColor = Color.LightYellow
-
-            ' Prioritäts-Formatierung und Farben - NEUE WERTE
-            Select Case prioritaet
-                Case 2 ' Notfall (war 3)
-                    newRow.DefaultCellStyle.ForeColor = Color.Red
-                    newRow.DefaultCellStyle.Font = New Font(dgvPatienten.Font, FontStyle.Bold)
-                    newRow.Cells("Prioritaet").Style.BackColor = Color.LightCoral
-                Case 1 ' Dringend (war 2)
-                    newRow.DefaultCellStyle.ForeColor = Color.OrangeRed
-                    newRow.Cells("Prioritaet").Style.BackColor = Color.LightYellow
-                Case Else ' Normal (0 oder andere)
-                    newRow.DefaultCellStyle.ForeColor = Color.Black
-                    newRow.Cells("Prioritaet").Style.BackColor = Color.White
-            End Select
-
-            ' Besucher kennzeichnen
-            If istBesucher Then
-                newRow.DefaultCellStyle.BackColor = Color.Lavender
-            End If
-
-            ' Nach Triage sortieren
-            SortierePatienten()
-
-            ' Zeile wieder finden und markieren
-            For Each row As DataGridViewRow In dgvPatienten.Rows
-                If row.Cells("PatientenID").Value?.ToString() = patientenID Then
-                    row.Selected = True
-                    dgvPatienten.CurrentCell = row.Cells(0)
-                    dgvPatienten.FirstDisplayedScrollingRowIndex = row.Index
-                    Exit For
-                End If
-            Next
-
-            ' Kurzes Highlight
-            If Not istBesucher Then
-                newRow.DefaultCellStyle.BackColor = Color.LightGreen
-            End If
-            Dim unused = Task.Delay(3000).ContinueWith(Sub(t)
-                                                           Me.Invoke(Sub()
-                                                                         If newRow.Index >= 0 AndAlso newRow.Index < dgvPatienten.Rows.Count Then
-                                                                             newRow.DefaultCellStyle.BackColor = If(istBesucher, Color.Lavender, Color.White)
-                                                                         End If
-                                                                     End Sub)
-                                                       End Sub)
-            Logger.Debug($"=== Neuer Patient ===")
-            Logger.Debug($"Original Name: {patientName}")
-            Logger.Debug($"Name Bytes: {String.Join(",", Encoding.UTF8.GetBytes(patientName))}")
-
-            ' WICHTIG: Patient auch an Server senden, damit er persistiert wird
-            Dim unusedTask = Task.Run(Async Function()
-                                          Try
-                                              Logger.Debug($"Sende neuen Patient an Server: ID={patientenID}, Priorität={prioritaet}")
-
-                                              Dim values As New Dictionary(Of String, String) From {
-                                                    {"patientenID", patientenID},
-                                                    {"name", patientName},
-                                                    {"vorname", vorname},
-                                                    {"nachname", nachname},
-                                                    {"status", "Wartend"},
-                                                    {"zimmer", If(String.IsNullOrEmpty(zimmer),
-                                                                 If(istBesucher, "Anmeldung", "Wartezimmer"),
-                                                                 zimmer)},  ' <-- angepasst
-                                                    {"prioritaet", prioritaet.ToString()},
-                                                    {"bemerkung", bemerkung},
-                                                    {"ankunftszeit", terminZeit.ToString("yyyy-MM-dd HH:mm:ss")},
-                                                    {"istBesucher", istBesucher.ToString()}
-                                                }
-
-                                              Dim content = New FormUrlEncodedContent(values)
-                                              Dim response = Await HttpClient.PostAsync($"{ServiceUrl}/api/neuerpatient", content)
-
-                                              Logger.Debug($"URL Encoded: {response}")
-
-                                              If Not response.IsSuccessStatusCode Then
-                                                  Me.Invoke(Sub()
-                                                                MessageBox.Show($"Warnung: Patient wurde nur lokal hinzugefügt. Server-Fehler: {response.StatusCode}",
-                                                                          "Server-Warnung", MessageBoxButtons.OK, MessageBoxIcon.Warning)
-                                                            End Sub)
-                                              End If
-                                          Catch ex As Exception
-                                              Logger.Debug($"Fehler beim Senden an Server: {ex.Message}")
-                                              Me.Invoke(Sub()
-                                                            MessageBox.Show($"Warnung: Patient wurde nur lokal hinzugefügt. Server nicht erreichbar.",
-                                                                      "Server-Warnung", MessageBoxButtons.OK, MessageBoxIcon.Warning)
-                                                        End Sub)
-                                          End Try
-                                          Return True
-                                      End Function)
-
-            ' Sound
-            Try
-                If prioritaet = 3 Then
-                    My.Computer.Audio.PlaySystemSound(Media.SystemSounds.Exclamation)
-                Else
-                    My.Computer.Audio.PlaySystemSound(Media.SystemSounds.Asterisk)
-                End If
-            Catch
-            End Try
-
-            ' Statusmeldung
-            Dim typ = If(istBesucher, "Besucher", "Patient")
-            lblStatus.Text = $"{typ} {nachname} wurde zur Warteschlange hinzugefügt"
-
-            UpdateStatusBar()
-
-        Catch ex As Exception
-
-            Logger.Debug($"Fehler beim Hinzufügen: {ex.Message}")
-        End Try
-    End Sub
 
     ' GDT-Integration: Neuer Patient von Medical Office
     Public Sub NeuerPatientVonGDT(gdtPatient As GDTParser.GDTPatient)
@@ -1352,8 +844,8 @@ Public Class FormPAS
                 .Status = "Wartend",
                 .Zimmer = "Wartezimmer",
                 .Wartezeit = 0,
-                .Prioritaet = 1,
-                .Bemerkung = "Über GDT hinzugefügt"
+                .Prioritaet = 0,
+                .Bemerkung = " "
             }
 
             ' Prüfen ob Patient bereits in der Liste
@@ -1598,107 +1090,7 @@ Public Class FormPAS
     End Sub
 
     Private Sub TreeView1_AfterCheck(sender As Object, e As TreeViewEventArgs) Handles TreeView1.AfterCheck
-        ' Rekursion verhindern
-        If isUpdating Then Return
-
-        isUpdating = True
-
-        Try
-            ' Bei Parent-Node alle Children mit-checken/unchecken
-            If e.Node.Nodes.Count > 0 Then
-                For Each childNode As TreeNode In e.Node.Nodes
-                    childNode.Checked = e.Node.Checked
-                Next
-            End If
-
-            ' Bei Child-Node: Parent anpassen
-            If e.Node.Parent IsNot Nothing Then
-                Dim parentNode = e.Node.Parent
-                Dim anyChecked = False
-                For Each childNode As TreeNode In parentNode.Nodes
-                    If childNode.Checked Then
-                        anyChecked = True
-                        Exit For
-                    End If
-                Next
-                parentNode.Checked = anyChecked
-            End If
-
-        Finally
-            isUpdating = False
-        End Try
-
-        ' Filter anwenden
-        ApplyZimmerFilter()
-    End Sub
-
-    Private Sub ApplyZimmerFilter()
-        ' Sammle aktive Filter
-        Dim aktiveFilter As New List(Of String)
-
-        ' Durchlaufe alle Nodes
-        For Each parentNode As TreeNode In TreeView1.Nodes
-            If parentNode.Text = "Behandlungszimmer" Then
-                ' Nur Child-Nodes prüfen
-                For Each childNode As TreeNode In parentNode.Nodes
-                    If childNode.Checked Then
-                        aktiveFilter.Add(childNode.Text)
-                    End If
-                Next
-            ElseIf parentNode.Checked Then
-                ' Andere Bereiche
-                Select Case parentNode.Text
-                    Case "Anmeldung"
-                        aktiveFilter.Add("Anmeldung")
-                        aktiveFilter.Add("Wartezimmer")
-                    Case "Labor"
-                        aktiveFilter.Add("Labor")
-                    Case "Röntgen"
-                        aktiveFilter.Add("Röntgen")
-                    Case "EKG"  ' Falls EKG auch als Parent existiert
-                        aktiveFilter.Add("EKG")
-                End Select
-            End If
-        Next
-
-        ' Filter anwenden
-        For Each row As DataGridViewRow In dgvPatienten.Rows
-            If row.IsNewRow Then Continue For
-
-            Dim zimmerWert = row.Cells("Zimmer").Value?.ToString()
-
-            If aktiveFilter.Count = 0 Then
-                ' Keine Filter aktiv = alle anzeigen
-                row.Visible = True
-            Else
-                ' Prüfen ob MINDESTENS EINES der gefilterten Zimmer im Zimmer-String vorkommt
-                Dim zeigeZeile = False
-                If Not String.IsNullOrEmpty(zimmerWert) Then
-                    ' Zimmer-String in einzelne Zimmer aufteilen
-                    Dim patientZimmer = zimmerWert.Split(","c).Select(Function(z) z.Trim()).ToList()
-
-                    ' Prüfen ob mindestens ein gefiltertes Zimmer dabei ist
-                    For Each gefiltertesZimmer As String In aktiveFilter
-                        If patientZimmer.Contains(gefiltertesZimmer) Then
-                            zeigeZeile = True
-                            Exit For
-                        End If
-                    Next
-                End If
-                row.Visible = zeigeZeile
-            End If
-        Next
-
-        ' Status aktualisieren
-        Dim sichtbar = dgvPatienten.Rows.Cast(Of DataGridViewRow).
-                Where(Function(r) Not r.IsNewRow AndAlso r.Visible).Count()
-        Dim total = dgvPatienten.Rows.Count - 1
-
-        If aktiveFilter.Count = 0 Then
-            lblStatus.Text = $"{total} Patienten (kein Filter aktiv)"
-        Else
-            lblStatus.Text = $"{sichtbar} von {total} Patienten (Filter: {String.Join(", ", aktiveFilter)})"
-        End If
+        BereicheManager.TreeView_AfterCheck(e)
     End Sub
 
     Private Sub dgvPatienten_CellValueChanged(sender As Object, e As DataGridViewCellEventArgs) Handles dgvPatienten.CellValueChanged
@@ -1733,104 +1125,115 @@ Public Class FormPAS
                      Return True
                  End Function)
     End Sub
-    Private Sub SetzeZeilenFarbe(row As DataGridViewRow, status As String, prioritaet As Integer)
-        ' Basis-Farben nach Status
-        Dim backColor As Color
-        Select Case status
-            Case "Wartend"
-                backColor = Color.FromArgb(255, 230, 230) ' Hellrot
-            Case "Aufgerufen"
-                backColor = Color.FromArgb(255, 255, 200) ' Hellgelb
-            Case "InBehandlung"
-                backColor = Color.FromArgb(230, 255, 230) ' Hellgrün
-            Case "Fertig"
-                backColor = Color.FromArgb(230, 230, 255) ' Hellblau
-            Case "Geplant"
-                backColor = Color.LightCyan
-            Case Else
-                backColor = Color.White
-        End Select
 
-        ' Priorität-Kennzeichnung IMMER anzeigen (auch bei Fertig)
-        If prioritaet = 2 Then ' Notfall
-            ' Dunkler Rand oder Markierung für Notfall-Historie
-            If status = "Fertig" Then
-                row.Cells("Prioritaet").Style.BackColor = Color.LightCoral
-                row.Cells("Prioritaet").Value = "NOTFALL"
-            Else
-                backColor = Color.FromArgb(255, 150, 150) ' Kräftiges Rot
-            End If
-            row.DefaultCellStyle.ForeColor = Color.DarkRed
-            row.DefaultCellStyle.Font = New Font(dgvPatienten.Font, FontStyle.Bold)
-        ElseIf prioritaet = 1 Then ' Dringend
-            row.DefaultCellStyle.ForeColor = Color.DarkOrange
-        Else
-            row.DefaultCellStyle.ForeColor = Color.Black
+    Private Sub dgvPatienten_SelectionChanged(sender As Object, e As EventArgs) Handles dgvPatienten.SelectionChanged
+        If dgvPatienten.SelectedRows.Count > 0 Then
+            Logger.Debug($"Selection geändert zu Zeile: {dgvPatienten.SelectedRows(0).Index}")
         End If
-
-        row.DefaultCellStyle.BackColor = backColor
     End Sub
 
-    Private Sub FaerbeZeilenNachStatus()
-        For Each row As DataGridViewRow In dgvPatienten.Rows
-            If row.IsNewRow Then Continue For
-
-            Dim status = row.Cells("Status").Value?.ToString()
-            Dim prioritaet = CInt(If(row.Cells("PrioritaetWert").Value, 0))
-
-            SetzeZeilenFarbe(row, status, prioritaet)
-        Next
-        dgvPatienten.Refresh()
-    End Sub
-
-
-    Private Class PatientenComparer
-        Implements IComparer
-
-        Public Function Compare(x As Object, y As Object) As Integer Implements IComparer.Compare
-            Dim row1 = CType(x, DataGridViewRow)
-            Dim row2 = CType(y, DataGridViewRow)
-
-            ' Fertige Patienten nach OBEN
-            Dim status1 = row1.Cells("Status").Value?.ToString()
-            Dim status2 = row2.Cells("Status").Value?.ToString()
-
-            ' Fertig = ganz oben (niedrigste Sortiernummer)
-            If status1 = "Fertig" AndAlso status2 <> "Fertig" Then Return -1
-            If status2 = "Fertig" AndAlso status1 <> "Fertig" Then Return 1
-
-            ' Innerhalb der fertigen Patienten: Nach Ankunftszeit
-            If status1 = "Fertig" AndAlso status2 = "Fertig" Then
-                Dim zeitFertig1 = CDate(If(row1.Cells("Ankunftszeit").Value, DateTime.MaxValue))
-                Dim zeitFertig2 = CDate(If(row2.Cells("Ankunftszeit").Value, DateTime.MaxValue))
-                Return zeitFertig1.CompareTo(zeitFertig2)
+    Public Sub NeuerPatientVonXML(xmlPatient As GDTParser.XMLPatient)
+        Try
+            If dgvPatienten.Columns.Count = 0 Then
+                Logger.Debug("Grid noch nicht initialisiert - XML-Patient wird verworfen")
+                Return
             End If
 
-            ' Für wartende/in Behandlung: Nach Priorität
-            Dim prio1 = CInt(If(row1.Cells("PrioritaetWert").Value, 0))
-            Dim prio2 = CInt(If(row2.Cells("PrioritaetWert").Value, 0))
+            ' PatientInfo aus XML-Daten erstellen
+            Dim patient As New PatientInfo With {
+                .PatientenID = xmlPatient.PatientenID,
+                .Name = $"{xmlPatient.Nachname}, {xmlPatient.Vorname}",
+                .Vorname = xmlPatient.Vorname,
+                .Nachname = xmlPatient.Nachname,
+                .Ankunftszeit = DateTime.Now,
+                .Status = "Wartend",
+                .Zimmer = "Wartezimmer",
+                .Wartezeit = 0,
+                .Prioritaet = 0,
+                .Bemerkung = ""
+            }
 
-            If prio1 <> prio2 Then
-                Return prio2.CompareTo(prio1)
+            ' Schein-ID separat speichern für späteren Aufruf
+            ' (in Dictionary oder Datenbank)
+            If Not String.IsNullOrEmpty(xmlPatient.ScheinID) Then
+                ' Speichere Mapping PatientenID -> ScheinID
+                StoreScheinIDMapping(xmlPatient.PatientenID, xmlPatient.ScheinID)
             End If
 
-            ' Bei gleicher Priorität: Nach Ankunftszeit
-            Dim zeitWartend1 = CDate(If(row1.Cells("Ankunftszeit").Value, DateTime.MaxValue))
-            Dim zeitWartend2 = CDate(If(row2.Cells("Ankunftszeit").Value, DateTime.MaxValue))
+            ' Prüfen ob Patient schon existiert
+            For Each row As DataGridViewRow In dgvPatienten.Rows
+                If Not row.IsNewRow AndAlso row.Cells("PatientenID").Value?.ToString() = patient.PatientenID Then
+                    Logger.Debug($"Patient {patient.PatientenID} bereits vorhanden")
+                    Return
+                End If
+            Next
 
-            Return zeitWartend1.CompareTo(zeitWartend2)
-        End Function
-    End Class
+            ' Patient hinzufügen
+            Dim index = dgvPatienten.Rows.Add()
+            Dim newRow = dgvPatienten.Rows(index)
 
-    Private Sub dgvPatienten_CellContentClick(sender As Object, e As DataGridViewCellEventArgs) Handles dgvPatienten.CellContentClick
+            newRow.Cells("PatientenID").Value = patient.PatientenID
+            newRow.Cells("Name").Value = patient.Name
+            newRow.Cells("Ankunftszeit").Value = patient.Ankunftszeit
+            newRow.Cells("Wartezeit").Value = "0 min"
+            newRow.Cells("Zimmer").Value = patient.Zimmer
+            newRow.Cells("Status").Value = patient.Status
+            newRow.Cells("PrioritaetWert").Value = patient.Prioritaet
+            newRow.Cells("Prioritaet").Value = GridManager.GetPrioritaetText(patient.Prioritaet)
+            newRow.Cells("Bemerkung").Value = patient.Bemerkung
 
+            ' An Server senden
+            ServerComm.PatientManuellHinzufuegen(
+                patient.PatientenID,
+                patient.Vorname,
+                patient.Nachname,
+                patient.Prioritaet,
+                patient.Bemerkung,
+                False,
+                patient.Ankunftszeit,
+                patient.Zimmer
+            )
+
+            ' Grid aktualisieren
+            GridManager.SortierePatienten()
+            GridManager.FaerbeZeilenNachStatus()
+
+            Logger.Debug($"XML-Patient {patient.PatientenID} hinzugefügt mit ScheinID {xmlPatient.ScheinID}")
+
+        Catch ex As Exception
+            Logger.Debug($"Fehler in NeuerPatientVonXML: {ex.Message}")
+        End Try
     End Sub
-End Class
 
-Public Class Bereich
-    Public Property ID As Integer
-    Public Property Bezeichnung As String
-    Public Property Typ As String
-    Public Property Aktiv As Boolean
-    Public Property Reihenfolge As Integer
+    ' Dictionary für ScheinID-Mapping
+    Private scheinIDMapping As New Dictionary(Of String, String)
+
+    Private Sub StoreScheinIDMapping(patientenID As String, scheinID As String)
+        scheinIDMapping(patientenID) = scheinID
+    End Sub
+
+    Private Function GetScheinID(patientenID As String) As String
+        If scheinIDMapping.ContainsKey(patientenID) Then
+            Return scheinIDMapping(patientenID)
+        End If
+        Return ""
+    End Function
+
+    'Private Sub ProcessSingleXMLFile(xmlFile As String)
+    '    Try
+    '        Dim xmlPatient = GDTParser.ParseMedicalOfficeXML(xmlFile)
+    '        If xmlPatient IsNot Nothing Then
+    '            ' Prüfen ob Grid bereit ist
+    '            If dgvPatienten.Columns.Count > 0 Then
+    '                NeuerPatientVonXML(xmlPatient)
+    '                File.Delete(xmlFile)
+    '                Logger.Debug($"XML-Datei verarbeitet und gelöscht: {xmlFile}")
+    '            Else
+    '                Logger.Debug("Grid noch nicht bereit - XML-Datei wird beim nächsten Durchlauf verarbeitet")
+    '            End If
+    '        End If
+    '    Catch ex As Exception
+    '        Logger.Debug($"XML-Verarbeitung fehlgeschlagen: {ex.Message}")
+    '    End Try
+    'End Sub
 End Class

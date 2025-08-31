@@ -21,7 +21,6 @@ Public Class FormPatientEingabe
 
     Public Property Zimmer As String
         Get
-            ' Beim Abrufen immer aktuell aus CheckedListBox lesen
             Dim ausgewaehlteZimmer As New List(Of String)
             For Each item In clbZimmer.CheckedItems
                 ausgewaehlteZimmer.Add(item.ToString())
@@ -29,21 +28,25 @@ Public Class FormPatientEingabe
             Return String.Join(", ", ausgewaehlteZimmer)
         End Get
         Set(value As String)
-            _zimmer = value
+            Logger.Debug($"Zimmer-Setter aufgerufen mit: '{value}'")
 
-            ' Erst alle abwählen
+            ' Alle abwählen
             For i = 0 To clbZimmer.Items.Count - 1
                 clbZimmer.SetItemChecked(i, False)
             Next
 
-            ' Dann die übergebenen Zimmer markieren
+            ' Übergebene Zimmer markieren
             If Not String.IsNullOrEmpty(value) Then
                 Dim zimmerListe = value.Split(","c).Select(Function(z) z.Trim()).ToList()
+                Logger.Debug($"Zimmer-Liste nach Split: {String.Join(" | ", zimmerListe)}")
 
                 For i = 0 To clbZimmer.Items.Count - 1
                     Dim itemText = clbZimmer.Items(i).ToString()
                     If zimmerListe.Contains(itemText) Then
+                        Logger.Debug($"Markiere: '{itemText}'")
                         clbZimmer.SetItemChecked(i, True)
+                    Else
+                        Logger.Debug($"Nicht gefunden: '{itemText}'")
                     End If
                 Next
             End If
@@ -65,6 +68,11 @@ Public Class FormPatientEingabe
         End If
 
         clbZimmer.CheckOnClick = True
+
+        ' Zimmer setzen wenn ZimmerTemp vorhanden (beim Bearbeiten)
+        If Not String.IsNullOrEmpty(ZimmerTemp) Then
+            Zimmer = ZimmerTemp
+        End If
 
         ' ComboBox für Priorität befüllen
         cmbPrioritaet.Items.Clear()
