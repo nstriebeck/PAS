@@ -52,6 +52,7 @@ Partial Class FormPAS
         Me.NotfallToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
         Me.lblTagesansicht = New System.Windows.Forms.Label()
         Me.Panel3 = New System.Windows.Forms.Panel()
+        Me.btnCheckIn = New System.Windows.Forms.Button()
         Me.btnExport = New System.Windows.Forms.Button()
         Me.btnFertig = New System.Windows.Forms.Button()
         Me.btnInBehandlung = New System.Windows.Forms.Button()
@@ -300,6 +301,7 @@ Partial Class FormPAS
         '
         'Panel3
         '
+        Me.Panel3.Controls.Add(Me.btnCheckIn)
         Me.Panel3.Controls.Add(Me.btnExport)
         Me.Panel3.Controls.Add(Me.btnFertig)
         Me.Panel3.Controls.Add(Me.btnInBehandlung)
@@ -310,9 +312,18 @@ Partial Class FormPAS
         Me.Panel3.Size = New System.Drawing.Size(1030, 50)
         Me.Panel3.TabIndex = 2
         '
+        'btnCheckIn
+        '
+        Me.btnCheckIn.Location = New System.Drawing.Point(19, 8)
+        Me.btnCheckIn.Name = "btnCheckIn"
+        Me.btnCheckIn.Size = New System.Drawing.Size(90, 30)
+        Me.btnCheckIn.TabIndex = 4
+        Me.btnCheckIn.Text = "Check - In"
+        Me.btnCheckIn.UseVisualStyleBackColor = True
+        '
         'btnExport
         '
-        Me.btnExport.Location = New System.Drawing.Point(357, 11)
+        Me.btnExport.Location = New System.Drawing.Point(478, 8)
         Me.btnExport.Name = "btnExport"
         Me.btnExport.Size = New System.Drawing.Size(100, 30)
         Me.btnExport.TabIndex = 3
@@ -321,7 +332,7 @@ Partial Class FormPAS
         '
         'btnFertig
         '
-        Me.btnFertig.Location = New System.Drawing.Point(241, 11)
+        Me.btnFertig.Location = New System.Drawing.Point(362, 8)
         Me.btnFertig.Name = "btnFertig"
         Me.btnFertig.Size = New System.Drawing.Size(100, 30)
         Me.btnFertig.TabIndex = 2
@@ -330,7 +341,7 @@ Partial Class FormPAS
         '
         'btnInBehandlung
         '
-        Me.btnInBehandlung.Location = New System.Drawing.Point(125, 11)
+        Me.btnInBehandlung.Location = New System.Drawing.Point(246, 8)
         Me.btnInBehandlung.Name = "btnInBehandlung"
         Me.btnInBehandlung.Size = New System.Drawing.Size(100, 30)
         Me.btnInBehandlung.TabIndex = 1
@@ -339,7 +350,7 @@ Partial Class FormPAS
         '
         'btnAufruf
         '
-        Me.btnAufruf.Location = New System.Drawing.Point(9, 11)
+        Me.btnAufruf.Location = New System.Drawing.Point(130, 8)
         Me.btnAufruf.Name = "btnAufruf"
         Me.btnAufruf.Size = New System.Drawing.Size(100, 30)
         Me.btnAufruf.TabIndex = 0
@@ -445,4 +456,5 @@ Partial Class FormPAS
     Friend WithEvents NormalToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents DringendToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents NotfallToolStripMenuItem As ToolStripMenuItem
+    Friend WithEvents btnCheckIn As Button
 End Class

@@ -69,6 +69,7 @@ Public Class UpdateManager
             ' Grid aktualisieren
             gridManager.SortierePatienten()
             gridManager.FaerbeZeilenNachStatus()
+            parent.PatientenGrid.ClearSelection()
             parent.UpdateStatusBar()
 
         Catch ex As Exception
@@ -77,6 +78,19 @@ Public Class UpdateManager
     End Sub
 
     Private Sub UpdateExistingRow(row As DataGridViewRow, patient As PatientInfo)
+        ' Status-Update nur wenn nicht "Geplant"
+        Dim currentStatus = row.Cells("Status").Value?.ToString()
+
+        If currentStatus = "Geplant" Then
+            ' Geplante Patienten nicht automatisch aktualisieren
+            ' Nur Priorität aktualisieren falls geändert
+            If row.Cells("PrioritaetWert").Value?.ToString() <> patient.Prioritaet.ToString() Then
+                row.Cells("PrioritaetWert").Value = patient.Prioritaet
+                row.Cells("Prioritaet").Value = gridManager.GetPrioritaetText(patient.Prioritaet)
+            End If
+            Return
+        End If
+
         ' Status aktualisieren
         If row.Cells("Status").Value?.ToString() <> patient.Status Then
             row.Cells("Status").Value = patient.Status
@@ -95,8 +109,8 @@ Public Class UpdateManager
 
         If patient.Status = "Wartend" Then
             row.Cells("Wartezeit").Value = $"{tatsaechlicheWartezeit} min (noch ca. {geschaetzteRestzeit} min)"
-        Else
-            row.Cells("Wartezeit").Value = $"{tatsaechlicheWartezeit} min"
+            'Else
+            '   row.Cells("Wartezeit").Value = $"{tatsaechlicheWartezeit} min"
         End If
 
         ' Priorität aktualisieren

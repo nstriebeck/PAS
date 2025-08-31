@@ -156,10 +156,17 @@ Public Class PatientenGridManager
     Public Sub SortierePatienten()
         If dgvPatienten.Rows.Count = 0 Then Return
 
+        ' Merke aktuelle PatientenID und ScrollPosition
+        Dim selectedPatID As String = Nothing
+        Dim scrollPosition = dgvPatienten.FirstDisplayedScrollingRowIndex
+
+        If dgvPatienten.CurrentRow IsNot Nothing Then
+            selectedPatID = dgvPatienten.CurrentRow.Cells("PatientenID").Value?.ToString()
+        End If
+
         Dim sortedList = dgvPatienten.Rows.Cast(Of DataGridViewRow)().
         Where(Function(r) Not r.IsNewRow).
         OrderBy(Function(r)
-                    ' Erst nach Status (Fertig = 0, andere = 1)
                     If r.Cells("Status").Value?.ToString() = "Fertig" Then
                         Return 0
                     Else
@@ -167,20 +174,64 @@ Public Class PatientenGridManager
                     End If
                 End Function).
         ThenByDescending(Function(r)
-                             ' Dann nach Priorität (nur bei nicht-fertigen)
                              If r.Cells("Status").Value?.ToString() <> "Fertig" Then
                                  Return CInt(If(r.Cells("PrioritaetWert").Value, 0))
                              Else
-                                 Return -1 ' Fertige ignorieren Priorität
+                                 Return -1
                              End If
                          End Function).
         ThenBy(Function(r) r.Cells("Ankunftszeit").Value).
         ToList()
 
+        ' Sortierung wie vorher...
+        'Dim sortedList = dgvPatienten.Rows.Cast(Of DataGridViewRow)().[...]
+
+        ' Suspend Layout für Performance
+        dgvPatienten.SuspendLayout()
+
         dgvPatienten.Rows.Clear()
         dgvPatienten.Rows.AddRange(sortedList.ToArray())
+
+        ' Selektion komplett entfernen
         dgvPatienten.ClearSelection()
+        dgvPatienten.CurrentCell = Nothing
+
+        ' Scroll-Position wiederherstellen
+        If scrollPosition >= 0 AndAlso scrollPosition < dgvPatienten.Rows.Count Then
+            dgvPatienten.FirstDisplayedScrollingRowIndex = scrollPosition
+        End If
+
+        dgvPatienten.ResumeLayout()
     End Sub
+
+    'Public Sub SortierePatienten()
+    '    If dgvPatienten.Rows.Count = 0 Then Return
+
+    '    Dim sortedList = dgvPatienten.Rows.Cast(Of DataGridViewRow)().
+    '    Where(Function(r) Not r.IsNewRow).
+    '    OrderBy(Function(r)
+    '                ' Erst nach Status (Fertig = 0, andere = 1)
+    '                If r.Cells("Status").Value?.ToString() = "Fertig" Then
+    '                    Return 0
+    '                Else
+    '                    Return 1
+    '                End If
+    '            End Function).
+    '    ThenByDescending(Function(r)
+    '                         ' Dann nach Priorität (nur bei nicht-fertigen)
+    '                         If r.Cells("Status").Value?.ToString() <> "Fertig" Then
+    '                             Return CInt(If(r.Cells("PrioritaetWert").Value, 0))
+    '                         Else
+    '                             Return -1 ' Fertige ignorieren Priorität
+    '                         End If
+    '                     End Function).
+    '    ThenBy(Function(r) r.Cells("Ankunftszeit").Value).
+    '    ToList()
+
+    '    dgvPatienten.Rows.Clear()
+    '    dgvPatienten.Rows.AddRange(sortedList.ToArray())
+    '    dgvPatienten.ClearSelection()
+    'End Sub
 
     Public Sub SetzeHistorieModus(aktivieren As Boolean)
         If aktivieren Then

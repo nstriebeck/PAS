@@ -18,6 +18,8 @@ Public Class FormPAS
 
     Private blinkState As Boolean = False
     Private WithEvents timerNotfallBlink As New Timer()
+    ' In FormPAS.vb ein ContextMenuStrip hinzufügen
+    Private WithEvents contextMenuPatient As New ContextMenuStrip()
 
     Private lastNotfallSound As DateTime = DateTime.MinValue
     Private notfallSoundEnabled As Boolean = True
@@ -78,6 +80,9 @@ Public Class FormPAS
         ' Erste Ladung
         UpdateManager.IntelligentesUpdate()
 
+        'Kontextmenü initialisieren
+        InitializeContextMenu()
+
         ' Zeit-Anzeige starten
         Dim timerZeit As New Timer()
         timerZeit.Interval = 1000
@@ -115,6 +120,120 @@ Public Class FormPAS
 
     End Sub
 
+    Private Sub InitializeContextMenu()
+        ' Neues Kontextmenü erstellen
+        contextMenuPatient = New ContextMenuStrip()
+
+        ' Menüeinträge erstellen
+        Dim menuCheckIn = New ToolStripMenuItem("Check-In (Geplant → Wartend)")
+        Dim menuAufruf = New ToolStripMenuItem("Aufruf")
+        Dim menuInBehandlung = New ToolStripMenuItem("In Behandlung")
+        Dim menuFertig = New ToolStripMenuItem("Fertig")
+        Dim menuBearbeiten = New ToolStripMenuItem("Bearbeiten")
+        Dim menuLoeschen = New ToolStripMenuItem("Löschen")
+
+        ' Event-Handler zuweisen
+        AddHandler menuCheckIn.Click, AddressOf ContextMenu_CheckIn
+        AddHandler menuAufruf.Click, AddressOf ContextMenu_Aufruf
+        AddHandler menuInBehandlung.Click, AddressOf ContextMenu_InBehandlung
+        AddHandler menuFertig.Click, AddressOf ContextMenu_Fertig
+        AddHandler menuBearbeiten.Click, AddressOf ContextMenu_Bearbeiten
+        AddHandler menuLoeschen.Click, AddressOf ContextMenu_Loeschen
+
+        ' Zum Kontextmenü hinzufügen
+        contextMenuPatient.Items.Add(menuCheckIn)
+        contextMenuPatient.Items.Add(New ToolStripSeparator())
+        contextMenuPatient.Items.Add(menuAufruf)
+        contextMenuPatient.Items.Add(menuInBehandlung)
+        contextMenuPatient.Items.Add(menuFertig)
+        contextMenuPatient.Items.Add(New ToolStripSeparator())
+        contextMenuPatient.Items.Add(menuBearbeiten)
+        contextMenuPatient.Items.Add(menuLoeschen)
+
+        ' Dem Grid zuweisen
+        dgvPatienten.ContextMenuStrip = contextMenuPatient
+    End Sub
+
+
+
+    ' Event-Handler für Kontextmenü
+    Private Sub ContextMenu_CheckIn(sender As Object, e As EventArgs)
+        If dgvPatienten.CurrentRow Is Nothing Then Return
+
+        Dim row = dgvPatienten.CurrentRow
+        Dim status = row.Cells("Status").Value?.ToString()
+
+        If status = "Geplant" Then
+            row.Cells("Status").Value = "Wartend"
+            row.Cells("Ankunftszeit").Value = DateTime.Now
+
+            Dim patientenID = row.Cells("PatientenID").Value?.ToString()
+            Task.Run(Async Function()
+                         Await ServerComm.StatusUpdate(patientenID, "Wartend", DateTime.Now)
+                         Return True
+                     End Function)
+
+            GridManager.FaerbeZeilenNachStatus()
+            GridManager.SortierePatienten()
+        End If
+    End Sub
+
+    Private Sub ContextMenu_Aufruf(sender As Object, e As EventArgs)
+        If dgvPatienten.CurrentRow IsNot Nothing Then
+            btnAufruf.PerformClick()
+        End If
+    End Sub
+
+    Private Sub ContextMenu_InBehandlung(sender As Object, e As EventArgs)
+        If dgvPatienten.CurrentRow IsNot Nothing Then
+            btnInBehandlung.PerformClick()
+        End If
+    End Sub
+
+    Private Sub ContextMenu_Fertig(sender As Object, e As EventArgs)
+        If dgvPatienten.CurrentRow IsNot Nothing Then
+            btnFertig.PerformClick()
+        End If
+    End Sub
+
+    Private Sub ContextMenu_Bearbeiten(sender As Object, e As EventArgs)
+        If dgvPatienten.CurrentRow IsNot Nothing Then
+            BearbeitePatient(dgvPatienten.CurrentRow)
+        End If
+    End Sub
+
+    Private Sub ContextMenu_Loeschen(sender As Object, e As EventArgs)
+        If dgvPatienten.CurrentRow IsNot Nothing Then
+            btnLoeschen.PerformClick()
+        End If
+    End Sub
+
+    ' Kontextmenü dynamisch anpassen basierend auf Status
+    Private Sub dgvPatienten_CellMouseDown(sender As Object, e As DataGridViewCellMouseEventArgs) Handles dgvPatienten.CellMouseDown
+        If e.Button = MouseButtons.Right AndAlso e.RowIndex >= 0 Then
+            dgvPatienten.CurrentCell = dgvPatienten.Rows(e.RowIndex).Cells(e.ColumnIndex)
+
+            Dim status = dgvPatienten.CurrentRow.Cells("Status").Value?.ToString()
+
+            ' Menüeinträge basierend auf Status aktivieren/deaktivieren
+            For Each item As ToolStripItem In contextMenuPatient.Items
+                If TypeOf item Is ToolStripMenuItem Then
+                    Dim menuItem = CType(item, ToolStripMenuItem)
+                    Select Case menuItem.Text
+                        Case "Check-In (Geplant → Wartend)"
+                            menuItem.Visible = (status = "Geplant")
+                        Case "Aufruf"
+                            menuItem.Enabled = (status = "Wartend")
+                        Case "In Behandlung"
+                            menuItem.Enabled = (status = "Aufgerufen")
+                        Case "Fertig"
+                            menuItem.Enabled = (status = "InBehandlung")
+                    End Select
+                End If
+            Next
+        End If
+    End Sub
+
     'Timer-Event für Blink-Effekt
     Private Sub timerNotfallBlink_Tick(sender As Object, e As EventArgs) Handles timerNotfallBlink.Tick
         blinkState = Not blinkState
@@ -139,17 +258,34 @@ Public Class FormPAS
                 End If
             End If
         Next
-        ' Sound alle 30 Sekunden wenn Notfall vorhanden
+
+        ' Sound-Block debuggen
         If hatNotfall AndAlso notfallSoundEnabled Then
-            If DateTime.Now.Subtract(lastNotfallSound).TotalSeconds > 30 Then
+            If DateTime.Now.Subtract(lastNotfallSound).TotalSeconds > 10 Then
                 Try
-                    My.Computer.Audio.PlaySystemSound(Media.SystemSounds.Exclamation)
+                    ' Verschiedene Sound-Methoden testen
+                    Console.Beep(1000, 500)  ' Einfacher Beep als Test
+                    ' Oder: My.Computer.Audio.PlaySystemSound(Media.SystemSounds.Exclamation)
+
                     lastNotfallSound = DateTime.Now
+                    Logger.Debug("Sound ausgelöst")
                 Catch ex As Exception
                     Logger.Debug($"Sound-Fehler: {ex.Message}")
                 End Try
             End If
         End If
+
+        ' Sound alle 30 Sekunden wenn Notfall vorhanden
+        'If hatNotfall AndAlso notfallSoundEnabled Then
+        '    If DateTime.Now.Subtract(lastNotfallSound).TotalSeconds > 10 Then
+        '        Try
+        '            My.Computer.Audio.PlaySystemSound(Media.SystemSounds.Exclamation)
+        '            lastNotfallSound = DateTime.Now
+        '        Catch ex As Exception
+        '            Logger.Debug($"Sound-Fehler: {ex.Message}")
+        '        End Try
+        '    End If
+        'End If
     End Sub
 
 
@@ -311,6 +447,7 @@ Public Class FormPAS
             End If
 
             ' Buttons aktivieren
+            btnCheckIn.Enabled = True
             btnAufruf.Enabled = True
             btnInBehandlung.Enabled = True
             btnFertig.Enabled = True
@@ -499,11 +636,15 @@ Public Class FormPAS
             dgvPatienten.Rows.Clear()
 
             ' Termine vom Server abrufen
-            Dim response = Await httpClient.GetAsync($"{serviceUrl}/api/warteschlange?datum={datum:yyyy-MM-dd}")
+            Dim response = Await HttpClient.GetAsync($"{ServiceUrl}/api/warteschlange?datum={datum:yyyy-MM-dd}")
 
             If response.IsSuccessStatusCode Then
                 Dim json = Await response.Content.ReadAsStringAsync()
+                Logger.Debug($"JSON empfangen: {json}")
+
                 Dim termine = JsonConvert.DeserializeObject(Of List(Of PatientInfo))(json)
+                Logger.Debug($"Deserialisiert: {termine.Count} Termine")
+
 
                 ' Statt nur nach Ankunftszeit sortieren:
                 ' termine = termine.OrderBy(Function(t) t.Ankunftszeit).ToList()
@@ -511,37 +652,37 @@ Public Class FormPAS
                 ' Nach Priorität DANN Ankunftszeit sortieren:
                 termine = termine.OrderByDescending(Function(t) t.Prioritaet).ThenBy(Function(t) t.Ankunftszeit).ToList()
 
+                Logger.Debug($"Füge {termine.Count} Termine ins Grid ein")
+
                 ' Grid befüllen
                 ' In LadeTermineFuerTag - vereinfacht ohne Färbung
                 For Each termin In termine
-                    Dim index = dgvPatienten.Rows.Add()
-                    Dim row = dgvPatienten.Rows(index)
+                    Try
+                        Dim index = dgvPatienten.Rows.Add()
+                        Dim row = dgvPatienten.Rows(index)
 
-                    row.Cells("PatientenID").Value = termin.PatientenID
-                    row.Cells("Name").Value = termin.Name
-                    row.Cells("Ankunftszeit").Value = termin.Ankunftszeit
-                    row.Cells("Wartezeit").Value = "-"
+                        row.Cells("PatientenID").Value = termin.PatientenID
+                        row.Cells("Name").Value = termin.Name
+                        row.Cells("Ankunftszeit").Value = termin.Ankunftszeit
+                        row.Cells("Wartezeit").Value = "-"
+                        row.Cells("Zimmer").Value = If(String.IsNullOrEmpty(termin.Zimmer), "Wartezimmer", termin.Zimmer)
+                        row.Cells("Status").Value = "Geplant"
+                        row.Cells("PrioritaetWert").Value = termin.Prioritaet
+                        row.Cells("Prioritaet").Value = GetPrioritaetText(termin.Prioritaet)
+                        row.Cells("Bemerkung").Value = termin.Bemerkung
 
-                    ' Zimmer-Wert prüfen und ggf. anpassen
-                    If Not String.IsNullOrEmpty(termin.Zimmer) Then
-                        Dim zimmerColumn = CType(dgvPatienten.Columns("Zimmer"), DataGridViewComboBoxColumn)
-                        If zimmerColumn.Items.Contains(termin.Zimmer) Then
-                            row.Cells("Zimmer").Value = termin.Zimmer
-                        Else
-                            row.Cells("Zimmer").Value = ""
-                        End If
-                    Else
-                        row.Cells("Zimmer").Value = ""
-                    End If
-
-                    row.Cells("Status").Value = "Geplant"
-                    row.Cells("PrioritaetWert").Value = termin.Prioritaet
-                    row.Cells("Prioritaet").Value = GetPrioritaetText(termin.Prioritaet)
-                    row.Cells("Bemerkung").Value = termin.Bemerkung
+                    Catch ex As Exception
+                        Logger.Debug($"Fehler beim Hinzufügen von Termin {termin.PatientenID}: {ex.Message}")
+                    End Try
                 Next
+
+                'Patienten sortieren
+                GridManager.SortierePatienten()
 
                 ' Einmal zentral färben
                 GridManager.FaerbeZeilenNachStatus()
+
+                UpdateStatusBar()
 
                 ' Statistik für geplante Termine
                 If termine.Count > 0 Then
@@ -611,7 +752,7 @@ Public Class FormPAS
                     .Width = 70
                 })
             End If
-
+            btnCheckIn.Enabled = False
             btnAufruf.Enabled = False
             btnInBehandlung.Enabled = False
             btnFertig.Enabled = False
@@ -624,6 +765,7 @@ Public Class FormPAS
                 dgvPatienten.Columns.Remove("Behandlungsende")
             End If
 
+            btnCheckIn.Enabled = False
             btnAufruf.Enabled = True
             btnInBehandlung.Enabled = True
             btnFertig.Enabled = True
@@ -823,11 +965,25 @@ Public Class FormPAS
         Using frm As New FormPatientEingabe()
             frm.IstBesucher = False
             frm.GewuenschtesDatum = MonthCalendar1.SelectionStart
+
+            ' Status basierend auf Datum setzen
+            Dim status As String = If(MonthCalendar1.SelectionStart.Date > Date.Today, "Geplant", "Wartend")
+
+
             If frm.ShowDialog(Me) = DialogResult.OK Then
-                ServerComm.PatientManuellHinzufuegen(frm.PatientenID, frm.Vorname, frm.Nachname,
-                                 frm.Prioritaet, frm.Bemerkung, frm.IstBesucher,
-                                 frm.TerminZeit, frm.Zimmer)  ' <-- Zimmer hinzugefügt
+                ServerComm.PatientManuellHinzufuegen(
+                frm.PatientenID, frm.Vorname, frm.Nachname,
+                frm.Prioritaet, frm.Bemerkung, frm.IstBesucher,
+                frm.TerminZeit, frm.Zimmer, status)
+
+                ' Grid manuell aktualisieren nach Hinzufügen
+                Task.Delay(500).ContinueWith(Sub(t)
+                                                 Me.Invoke(Sub()
+                                                               UpdateManager.IntelligentesUpdate()
+                                                           End Sub)
+                                             End Sub)
             End If
+
         End Using
     End Sub
 
@@ -1128,7 +1284,9 @@ Public Class FormPAS
 
     Private Sub dgvPatienten_SelectionChanged(sender As Object, e As EventArgs) Handles dgvPatienten.SelectionChanged
         If dgvPatienten.SelectedRows.Count > 0 Then
+            Dim stackTrace = New System.Diagnostics.StackTrace()
             Logger.Debug($"Selection geändert zu Zeile: {dgvPatienten.SelectedRows(0).Index}")
+            Logger.Debug($"Aufgerufen von: {stackTrace.GetFrame(1).GetMethod().Name}")
         End If
     End Sub
 
@@ -1218,6 +1376,38 @@ Public Class FormPAS
         End If
         Return ""
     End Function
+
+    Private Sub btnCheckIn_Click(sender As Object, e As EventArgs) Handles btnCheckIn.Click
+        If dgvPatienten.CurrentRow Is Nothing Then Return
+
+        Dim row = dgvPatienten.CurrentRow
+        Dim status = row.Cells("Status").Value?.ToString()
+        Dim patientenID = row.Cells("PatientenID").Value?.ToString()
+
+        If status = "Geplant" Then
+            ' Status auf Wartend setzen
+            row.Cells("Status").Value = "Wartend"
+            row.Cells("Ankunftszeit").Value = DateTime.Now
+            row.Cells("Wartezeit").Value = "0 min"
+
+            ' Server-Update
+            Task.Run(Async Function()
+                         Await ServerComm.StatusUpdate(patientenID, "Wartend", DateTime.Now)
+                         Return True
+                     End Function)
+
+            ' Grid aktualisieren
+            GridManager.FaerbeZeilenNachStatus()
+            GridManager.SortierePatienten()
+
+            Logger.Debug($"Patient {patientenID} eingecheckt")
+        Else
+            MessageBox.Show("Nur geplante Patienten können eingecheckt werden.",
+                       "Hinweis", MessageBoxButtons.OK, MessageBoxIcon.Information)
+        End If
+    End Sub
+
+
 
     'Private Sub ProcessSingleXMLFile(xmlFile As String)
     '    Try

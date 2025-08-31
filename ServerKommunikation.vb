@@ -33,8 +33,9 @@ Public Class ServerKommunikation
     End Function
 
     Public Async Sub PatientManuellHinzufuegen(patientenID As String, vorname As String, nachname As String,
-                                              prioritaet As Integer, bemerkung As String, istBesucher As Boolean,
-                                              terminZeit As DateTime, zimmer As String)
+                                          prioritaet As Integer, bemerkung As String, istBesucher As Boolean,
+                                          terminZeit As DateTime, zimmer As String,
+                                          Optional status As String = "Wartend")  ' <-- Status-Parameter hinzufügen
         Try
             Dim patientName = If(String.IsNullOrWhiteSpace(vorname), nachname, $"{nachname}, {vorname}")
 
@@ -45,7 +46,7 @@ Public Class ServerKommunikation
                 {"name", patientName},
                 {"vorname", vorname},
                 {"nachname", nachname},
-                {"status", "Wartend"},
+                {"status", status},
                 {"zimmer", If(String.IsNullOrEmpty(zimmer), If(istBesucher, "Anmeldung", "Wartezimmer"), zimmer)},
                 {"prioritaet", prioritaet.ToString()},
                 {"bemerkung", bemerkung},
