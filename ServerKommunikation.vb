@@ -14,6 +14,31 @@ Public Class ServerKommunikation
         httpClient = ConfigModule.HttpClient
         serviceUrl = ConfigModule.ServiceUrl
     End Sub
+    Public Async Function CheckInPatient(patientenID As String) As Task(Of Boolean)
+        Try
+            ' Check-In mit Wartezeit 0
+            Dim values As New Dictionary(Of String, String) From {
+            {"patientenID", patientenID},
+            {"status", "Wartend"},
+            {"wartezeit", "0"},
+            {"ankunftszeit", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}
+        }
+
+            Dim content = New FormUrlEncodedContent(values)
+            Dim response = Await httpClient.PostAsync($"{serviceUrl}/api/checkin", content)
+
+            If response.IsSuccessStatusCode Then
+                Logger.Debug($"Patient {patientenID} erfolgreich eingecheckt - Wartezeit auf 0 gesetzt")
+                Return True
+            Else
+                Logger.Debug($"Check-In fehlgeschlagen: {response.StatusCode}")
+                Return False
+            End If
+        Catch ex As Exception
+            Logger.Debug($"Fehler beim Check-In: {ex.Message}")
+            Return False
+        End Try
+    End Function
 
     Public Async Function HoleDatenVomServer() As Task(Of List(Of PatientInfo))
         Try

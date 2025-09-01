@@ -1293,79 +1293,6 @@ Public Class FormPAS
         End If
     End Sub
 
-    Public Sub NeuerPatientVonXML(xmlPatient As GDTParser.XMLPatient)
-        Try
-            If dgvPatienten.Columns.Count = 0 Then
-                Logger.Debug("Grid noch nicht initialisiert - XML-Patient wird verworfen")
-                Return
-            End If
-
-            ' PatientInfo aus XML-Daten erstellen
-            Dim patient As New PatientInfo With {
-                .PatientenID = xmlPatient.PatientenID,
-                .Name = $"{xmlPatient.Nachname}, {xmlPatient.Vorname}",
-                .Vorname = xmlPatient.Vorname,
-                .Nachname = xmlPatient.Nachname,
-                .Ankunftszeit = DateTime.Now,
-                .Status = "Wartend",
-                .Zimmer = "Wartezimmer",
-                .Wartezeit = 0,
-                .Prioritaet = 0,
-                .Bemerkung = ""
-            }
-
-            ' Schein-ID separat speichern für späteren Aufruf
-            ' (in Dictionary oder Datenbank)
-            If Not String.IsNullOrEmpty(xmlPatient.ScheinID) Then
-                ' Speichere Mapping PatientenID -> ScheinID
-                StoreScheinIDMapping(xmlPatient.PatientenID, xmlPatient.ScheinID)
-            End If
-
-            ' Prüfen ob Patient schon existiert
-            For Each row As DataGridViewRow In dgvPatienten.Rows
-                If Not row.IsNewRow AndAlso row.Cells("PatientenID").Value?.ToString() = patient.PatientenID Then
-                    Logger.Debug($"Patient {patient.PatientenID} bereits vorhanden")
-                    Return
-                End If
-            Next
-
-            ' Patient hinzufügen
-            Dim index = dgvPatienten.Rows.Add()
-            Dim newRow = dgvPatienten.Rows(index)
-
-            newRow.Cells("PatientenID").Value = patient.PatientenID
-            newRow.Cells("Name").Value = patient.Name
-            newRow.Cells("Ankunftszeit").Value = patient.Ankunftszeit
-            newRow.Cells("Wartezeit").Value = "0 min"
-            newRow.Cells("Zimmer").Value = patient.Zimmer
-            newRow.Cells("Status").Value = patient.Status
-            newRow.Cells("PrioritaetWert").Value = patient.Prioritaet
-            newRow.Cells("Prioritaet").Value = GridManager.GetPrioritaetText(patient.Prioritaet)
-            newRow.Cells("Bemerkung").Value = patient.Bemerkung
-
-            ' An Server senden
-            ServerComm.PatientManuellHinzufuegen(
-                patient.PatientenID,
-                patient.Vorname,
-                patient.Nachname,
-                patient.Prioritaet,
-                patient.Bemerkung,
-                False,
-                patient.Ankunftszeit,
-                patient.Zimmer
-            )
-
-            ' Grid aktualisieren
-            GridManager.SortierePatienten()
-            GridManager.FaerbeZeilenNachStatus()
-
-            Logger.Debug($"XML-Patient {patient.PatientenID} hinzugefügt mit ScheinID {xmlPatient.ScheinID}")
-
-        Catch ex As Exception
-            Logger.Debug($"Fehler in NeuerPatientVonXML: {ex.Message}")
-        End Try
-    End Sub
-
     ' Dictionary für ScheinID-Mapping
     Private scheinIDMapping As New Dictionary(Of String, String)
 
@@ -1380,7 +1307,7 @@ Public Class FormPAS
         Return ""
     End Function
 
-    Private Sub btnCheckIn_Click(sender As Object, e As EventArgs) Handles btnCheckIn.Click
+    Private Async Sub btnCheckIn_Click(sender As Object, e As EventArgs) Handles btnCheckIn.Click
         If dgvPatienten.CurrentRow Is Nothing Then Return
 
         Dim row = dgvPatienten.CurrentRow
@@ -1391,42 +1318,326 @@ Public Class FormPAS
             ' Status auf Wartend setzen
             row.Cells("Status").Value = "Wartend"
             row.Cells("Ankunftszeit").Value = DateTime.Now
-            row.Cells("Wartezeit").Value = "0 min"
+            row.Cells("Wartezeit").Value = "0 min"  ' WICHTIG: Wartezeit auf 0
 
-            ' Server-Update
-            Task.Run(Async Function()
-                         Await ServerComm.StatusUpdate(patientenID, "Wartend", DateTime.Now)
-                         Return True
-                     End Function)
+            ' Check-In über neue Methode
+            Dim erfolg = Await ServerComm.CheckInPatient(patientenID)
 
-            ' Grid aktualisieren
-            GridManager.FaerbeZeilenNachStatus()
-            GridManager.SortierePatienten()
-
-            Logger.Debug($"Patient {patientenID} eingecheckt")
+            If erfolg Then
+                ' Grid aktualisieren
+                GridManager.FaerbeZeilenNachStatus()
+                GridManager.SortierePatienten()
+                Logger.Debug($"Patient {patientenID} eingecheckt - Wartezeit: 0")
+                lblStatus.Text = $"Patient {patientenID} eingecheckt"
+            Else
+                MessageBox.Show("Check-In konnte nicht an Server übertragen werden",
+                          "Warnung", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+                ' Bei Fehler zurücksetzen
+                row.Cells("Status").Value = "Geplant"
+            End If
         Else
             MessageBox.Show("Nur geplante Patienten können eingecheckt werden.",
                        "Hinweis", MessageBoxButtons.OK, MessageBoxIcon.Information)
         End If
     End Sub
 
+    ' In FormPAS.vb - NeuerPatientVonXML Methode ersetzen:
+
+    Public Sub NeuerPatientVonXML(xmlPatient As GDTParser.XMLPatient)
+        Try
+            If dgvPatienten.Columns.Count = 0 Then
+                Logger.Debug("Grid noch nicht initialisiert - XML-Patient wird verworfen")
+                Return
+            End If
+
+            ' Formular in den Vordergrund bringen
+            Me.WindowState = FormWindowState.Normal
+            Me.BringToFront()
+            Me.Activate()
+            Me.TopMost = True
+            Application.DoEvents()
+            Me.TopMost = False
+
+            ' Bestätigungsdialog anzeigen
+            Dim result = ShowXMLPatientImportDialog(xmlPatient)
+
+            If result.Bestaetigt Then
+                ' Patient mit gewähltem Zimmer und Wartezeit 0 hinzufügen
+                AddPatientFromXMLImport(xmlPatient, result.Zimmer, result.IstCheckIn)
+            End If
+
+        Catch ex As Exception
+            Logger.Debug($"Fehler in NeuerPatientVonXML: {ex.Message}")
+        End Try
+    End Sub
+
+    ' Neue Methode für den Import-Dialog
+    Private Function ShowXMLPatientImportDialog(xmlPatient As GDTParser.XMLPatient) As (Bestaetigt As Boolean, Zimmer As String, IstCheckIn As Boolean)
+        ' Variablen VOR ShowDialog deklarieren
+        Dim dialogResult As DialogResult
+        Dim zimmer As String = ""
+        Dim istCheckIn As Boolean = False
+
+        Dim importDialog As New Form With {
+        .Text = "Patient aus Medical Office gefunden",
+        .Size = New Size(500, 380),
+        .StartPosition = FormStartPosition.CenterScreen,
+        .FormBorderStyle = FormBorderStyle.FixedDialog,
+        .MaximizeBox = False,
+        .MinimizeBox = False,
+        .TopMost = True,
+        .BackColor = Color.White
+    }
+
+        ' Header Panel mit Icon
+        Dim headerPanel As New Panel With {
+        .Dock = DockStyle.Top,
+        .Height = 60,
+        .BackColor = Color.FromArgb(40, 167, 69)
+    }
+
+        Dim lblHeader As New Label With {
+        .Text = "✓ Patient gefunden",
+        .Font = New Font("Segoe UI", 16, FontStyle.Bold),
+        .ForeColor = Color.White,
+        .Location = New Point(20, 15),
+        .AutoSize = True
+    }
+        headerPanel.Controls.Add(lblHeader)
+
+        ' Frage-Label
+        Dim lblFrage As New Label With {
+        .Text = "Möchten Sie den Patienten eintragen?",
+        .Location = New Point(20, 75),
+        .Size = New Size(440, 25),
+        .Font = New Font("Segoe UI", 11)
+    }
+
+        ' Patient-Details Panel
+        Dim detailsPanel As New Panel With {
+        .Location = New Point(20, 105),
+        .Size = New Size(440, 90),
+        .BackColor = Color.FromArgb(248, 249, 250),
+        .BorderStyle = BorderStyle.FixedSingle
+    }
+
+        Dim lblDetails As New Label With {
+        .Text = $"PatNr: {xmlPatient.PatientenID}" & vbCrLf &
+                $"Name: {xmlPatient.Nachname}, {xmlPatient.Vorname}" & vbCrLf &
+                $"Geburtsdatum: {xmlPatient.Geburtsdatum}" &
+                If(Not String.IsNullOrEmpty(xmlPatient.ScheinID), vbCrLf & $"Schein-ID: {xmlPatient.ScheinID}", ""),
+        .Location = New Point(10, 10),
+        .Size = New Size(420, 70),
+        .Font = New Font("Segoe UI", 10)
+    }
+        detailsPanel.Controls.Add(lblDetails)
+
+        ' Zimmer-Auswahl
+        Dim lblZimmer As New Label With {
+        .Text = "Bereich/Zimmer:",
+        .Location = New Point(20, 210),
+        .Size = New Size(120, 25),
+        .Font = New Font("Segoe UI", 10)
+    }
+
+        Dim cboZimmer As New ComboBox With {
+        .Location = New Point(145, 208),
+        .Size = New Size(315, 25),
+        .DropDownStyle = ComboBoxStyle.DropDownList,
+        .Font = New Font("Segoe UI", 10)
+    }
+
+        ' Bereiche laden
+        Try
+            For Each bereich In ConfigModule.BereicheListe
+                If bereich.Aktiv Then
+                    cboZimmer.Items.Add(bereich.Bezeichnung)
+                End If
+            Next
+        Catch
+            ' Fallback wenn BereicheListe nicht verfügbar
+            cboZimmer.Items.AddRange({"Wartezimmer", "Anmeldung", "Labor",
+                                  "Zimmer 1", "Zimmer 2", "Zimmer 3",
+                                  "Zimmer 4", "Zimmer 5", "EKG"})
+        End Try
+
+        cboZimmer.SelectedIndex = 0 ' Wartezimmer als Standard
+
+        ' Check-In Checkbox
+        Dim chkCheckIn As New CheckBox With {
+        .Text = "Sofort einchecken (Wartezeit beginnt jetzt)",
+        .Location = New Point(20, 245),
+        .Size = New Size(440, 25),
+        .Font = New Font("Segoe UI", 10),
+        .Checked = True ' Standardmäßig aktiviert
+    }
+
+        ' Buttons
+        Dim btnEintragen As New Button With {
+        .Text = "✓ Eintragen",
+        .Location = New Point(150, 290),
+        .Size = New Size(130, 40),
+        .DialogResult = dialogResult.OK,
+        .BackColor = Color.FromArgb(40, 167, 69),
+        .ForeColor = Color.White,
+        .FlatStyle = FlatStyle.Flat,
+        .Font = New Font("Segoe UI", 11, FontStyle.Bold),
+        .Cursor = Cursors.Hand
+    }
+        btnEintragen.FlatAppearance.BorderSize = 0
+
+        Dim btnAbbrechen As New Button With {
+        .Text = "Abbrechen",
+        .Location = New Point(290, 290),
+        .Size = New Size(110, 40),
+        .DialogResult = dialogResult.Cancel,
+        .BackColor = Color.FromArgb(108, 117, 125),
+        .ForeColor = Color.White,
+        .FlatStyle = FlatStyle.Flat,
+        .Font = New Font("Segoe UI", 11),
+        .Cursor = Cursors.Hand
+    }
+        btnAbbrechen.FlatAppearance.BorderSize = 0
+
+        ' Controls hinzufügen
+        importDialog.Controls.Add(headerPanel)
+        importDialog.Controls.Add(lblFrage)
+        importDialog.Controls.Add(detailsPanel)
+        importDialog.Controls.Add(lblZimmer)
+        importDialog.Controls.Add(cboZimmer)
+        importDialog.Controls.Add(chkCheckIn)
+        importDialog.Controls.Add(btnEintragen)
+        importDialog.Controls.Add(btnAbbrechen)
 
 
-    'Private Sub ProcessSingleXMLFile(xmlFile As String)
-    '    Try
-    '        Dim xmlPatient = GDTParser.ParseMedicalOfficeXML(xmlFile)
-    '        If xmlPatient IsNot Nothing Then
-    '            ' Prüfen ob Grid bereit ist
-    '            If dgvPatienten.Columns.Count > 0 Then
-    '                NeuerPatientVonXML(xmlPatient)
-    '                File.Delete(xmlFile)
-    '                Logger.Debug($"XML-Datei verarbeitet und gelöscht: {xmlFile}")
-    '            Else
-    '                Logger.Debug("Grid noch nicht bereit - XML-Datei wird beim nächsten Durchlauf verarbeitet")
-    '            End If
-    '        End If
-    '    Catch ex As Exception
-    '        Logger.Debug($"XML-Verarbeitung fehlgeschlagen: {ex.Message}")
-    '    End Try
-    'End Sub
+
+        ' Dialog anzeigen
+        DialogResult = importDialog.ShowDialog(Me)
+
+        ' Werte nach dem Schließen auslesen, aber vor Dispose
+        If dialogResult = DialogResult.OK Then
+            zimmer = cboZimmer.SelectedItem?.ToString()
+            istCheckIn = chkCheckIn.Checked
+        End If
+
+        importDialog.Dispose()
+
+        ' Ergebnis zurückgeben
+        Return (dialogResult = DialogResult.OK,
+            If(String.IsNullOrEmpty(zimmer), "Wartezimmer", zimmer),
+            istCheckIn)
+    End Function
+
+    ' Hilfsmethode zum Hinzufügen des Patienten
+    Private Sub AddPatientFromXMLImport(xmlPatient As GDTParser.XMLPatient, zimmer As String, istCheckIn As Boolean)
+        Try
+            ' PatientInfo erstellen
+            Dim patient As New PatientInfo With {
+            .PatientenID = xmlPatient.PatientenID,
+            .Name = $"{xmlPatient.Nachname}, {xmlPatient.Vorname}",
+            .Vorname = xmlPatient.Vorname,
+            .Nachname = xmlPatient.Nachname,
+            .Ankunftszeit = DateTime.Now,
+            .Status = If(istCheckIn, "Wartend", "Geplant"),
+            .Zimmer = zimmer,
+            .Wartezeit = If(istCheckIn, 0, -1), ' 0 bei Check-In, sonst -1
+            .Prioritaet = 0,
+            .Bemerkung = "Aus Medical Office importiert"
+        }
+
+            ' Schein-ID speichern falls vorhanden
+            If Not String.IsNullOrEmpty(xmlPatient.ScheinID) Then
+                StoreScheinIDMapping(xmlPatient.PatientenID, xmlPatient.ScheinID)
+                patient.Bemerkung &= $" (Schein: {xmlPatient.ScheinID})"
+            End If
+
+            ' Prüfen ob Patient schon existiert
+            For Each row As DataGridViewRow In dgvPatienten.Rows
+                If Not row.IsNewRow AndAlso row.Cells("PatientenID").Value?.ToString() = patient.PatientenID Then
+                    ' Patient existiert bereits - Dialog anzeigen
+                    Dim updateResult = MessageBox.Show(
+                    $"Patient {patient.PatientenID} ist bereits in der Liste." & vbCrLf &
+                    "Möchten Sie die Daten aktualisieren?",
+                    "Patient bereits vorhanden",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question)
+
+                    If updateResult = DialogResult.Yes Then
+                        ' Zeile aktualisieren
+                        row.Cells("Status").Value = patient.Status
+                        row.Cells("Zimmer").Value = patient.Zimmer
+                        row.Cells("Ankunftszeit").Value = patient.Ankunftszeit
+                        If istCheckIn Then
+                            row.Cells("Wartezeit").Value = "0 min"
+                        End If
+                        GridManager.FaerbeZeilenNachStatus()
+                    End If
+                    Return
+                End If
+            Next
+
+            ' Patient im Grid hinzufügen
+            Dim index = dgvPatienten.Rows.Add()
+            Dim newRow = dgvPatienten.Rows(index)
+
+            newRow.Cells("PatientenID").Value = patient.PatientenID
+            newRow.Cells("Name").Value = patient.Name
+            newRow.Cells("Ankunftszeit").Value = patient.Ankunftszeit
+            newRow.Cells("Wartezeit").Value = If(istCheckIn, "0 min", "-")
+            newRow.Cells("Zimmer").Value = patient.Zimmer
+            newRow.Cells("Status").Value = patient.Status
+            newRow.Cells("PrioritaetWert").Value = patient.Prioritaet
+            newRow.Cells("Prioritaet").Value = GridManager.GetPrioritaetText(patient.Prioritaet)
+            newRow.Cells("Bemerkung").Value = patient.Bemerkung
+
+            ' An Server senden mit korrekter Wartezeit
+            ServerComm.PatientManuellHinzufuegen(
+            patient.PatientenID,
+            patient.Vorname,
+            patient.Nachname,
+            patient.Prioritaet,
+            patient.Bemerkung,
+            False,
+            patient.Ankunftszeit,
+            patient.Zimmer,
+            patient.Status
+        )
+
+            ' Bei Check-In zusätzlich Wartezeit auf 0 setzen
+            If istCheckIn Then
+                Task.Run(Async Function()
+                             Await Task.Delay(500) ' Kurz warten bis Patient angelegt ist
+                             Await ServerComm.CheckInPatient(patient.PatientenID)
+                             Return True
+                         End Function)
+            End If
+
+            ' Grid aktualisieren
+            GridManager.SortierePatienten()
+            GridManager.FaerbeZeilenNachStatus()
+
+            ' Erfolgs-Feedback
+            lblStatus.Text = $"Patient {patient.PatientenID} wurde " &
+                        If(istCheckIn, "eingecheckt", "eingetragen")
+
+            ' Kurzes visuelles Feedback
+            newRow.DefaultCellStyle.BackColor = Color.LightGreen
+            Task.Delay(3000).ContinueWith(Sub()
+                                              Me.Invoke(Sub()
+                                                            If newRow.Index >= 0 AndAlso newRow.Index < dgvPatienten.Rows.Count Then
+                                                                newRow.DefaultCellStyle.BackColor = Color.White
+                                                                GridManager.FaerbeZeilenNachStatus()
+                                                            End If
+                                                        End Sub)
+                                          End Sub)
+
+            Logger.Debug($"XML-Patient {patient.PatientenID} importiert - Zimmer: {zimmer}, Check-In: {istCheckIn}")
+
+        Catch ex As Exception
+            Logger.Debug($"Fehler beim XML-Import: {ex.Message}")
+            MessageBox.Show($"Fehler beim Import: {ex.Message}",
+                       "Fehler", MessageBoxButtons.OK, MessageBoxIcon.Error)
+        End Try
+    End Sub
+
 End Class

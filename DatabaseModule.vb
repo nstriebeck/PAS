@@ -211,6 +211,50 @@ END"
                     cmd.ExecuteNonQuery()
                 End Using
 
+
+
+
+                ' System-Konfiguration
+                Dim createFarbtabelleSQL As String = "
+            IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Farbkonfiguration')
+BEGIN
+    CREATE TABLE Farbkonfiguration (
+        StatusName NVARCHAR(50) PRIMARY KEY,
+        FarbeHex NVARCHAR(7) NOT NULL,
+        Beschreibung NVARCHAR(100)
+    );
+    
+    -- Kräftigere Standard-Farben einfügen
+    INSERT INTO Farbkonfiguration (StatusName, FarbeHex, Beschreibung) VALUES
+    ('wartend', '#FF9800', 'Kräftiges Orange'),
+    ('aufgerufen', '#4CAF50', 'Kräftiges Grün'),
+    ('in Behandlung', '#2196F3', 'Kräftiges Blau'),
+    ('gegangen', '#9E9E9E', 'Mittelgrau'),
+    ('Notfall', '#F44336', 'Kräftiges Rot'),
+    ('NotfallBlink', '#FFCDD2', 'Hellrot für Blink');
+    
+    PRINT 'Farbkonfiguration-Tabelle wurde erfolgreich erstellt';
+END
+ELSE
+BEGIN
+    PRINT 'Farbkonfiguration-Tabelle existiert bereits';
+END
+GO
+
+-- Optional: Farben aktualisieren wenn Tabelle schon existiert
+-- UPDATE Farbkonfiguration SET FarbeHex = '#FF9800' WHERE StatusName = 'wartend';
+-- UPDATE Farbkonfiguration SET FarbeHex = '#4CAF50' WHERE StatusName = 'aufgerufen';
+-- UPDATE Farbkonfiguration SET FarbeHex = '#2196F3' WHERE StatusName = 'in Behandlung';
+-- UPDATE Farbkonfiguration SET FarbeHex = '#9E9E9E' WHERE StatusName = 'gegangen';
+-- UPDATE Farbkonfiguration SET FarbeHex = '#F44336' WHERE StatusName = 'Notfall';
+-- UPDATE Farbkonfiguration SET FarbeHex = '#FFCDD2' WHERE StatusName = 'NotfallBlink';"
+
+                Using cmd As New SqlCommand(createFarbtabelleSQL, conn)
+                    cmd.ExecuteNonQuery()
+                End Using
+
+
+
                 If MainForm IsNot Nothing Then MainForm.lblStatus.Text = "PAS-Datenbank initialisiert"
                 If MainForm IsNot Nothing Then MainForm.lblStatus.ForeColor = Color.Green
 
