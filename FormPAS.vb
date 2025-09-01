@@ -246,8 +246,8 @@ Public Class FormPAS
             Dim prioritaet = CInt(If(row.Cells("PrioritaetWert").Value, 0))
             Dim status = row.Cells("Status").Value?.ToString()
 
-            If prioritaet = 2 AndAlso (status = "Wartend" OrElse status = "Aufgerufen") Then
-                hatNotfall = True  ' <-- HIER SETZEN
+            If prioritaet = 2 AndAlso (status = "Wartend" OrElse status = "Aufgerufen" OrElse status = "InBehandlung") Then
+                hatNotfall = True
 
                 If blinkState Then
                     row.DefaultCellStyle.BackColor = Color.Red
@@ -256,6 +256,9 @@ Public Class FormPAS
                     row.DefaultCellStyle.BackColor = Color.Yellow
                     row.DefaultCellStyle.ForeColor = Color.Black
                 End If
+
+                ' Font auf Bold setzen
+                row.DefaultCellStyle.Font = New Font(dgvPatienten.Font, FontStyle.Bold)
             End If
         Next
 

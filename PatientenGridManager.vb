@@ -102,14 +102,15 @@ Public Class PatientenGridManager
     End Sub
 
     Private Sub SetzeZeilenFarbe(row As DataGridViewRow, status As String, prioritaet As Integer)
-        ' Bei Notfall im Wartend/Aufgerufen-Status nicht färben (Blink-Effekt hat Vorrang)
+        ' Bei Notfall mit Status Wartend/Aufgerufen NICHT hier färben
+        ' Der Blink-Timer übernimmt das
         If prioritaet = 2 AndAlso (status = "Wartend" OrElse status = "Aufgerufen") Then
-            ' Nichts tun - lass den Blink-Timer die Farbe setzen
+            ' Nichts tun - Blink-Timer macht die Arbeit
             Return
         End If
 
+        ' Normale Färbung für andere Fälle
         Dim backColor As Color
-
         Select Case status
             Case "Wartend"
                 backColor = Color.FromArgb(255, 230, 230)
@@ -119,11 +120,11 @@ Public Class PatientenGridManager
                 backColor = Color.FromArgb(230, 255, 230)
             Case "Fertig"
                 backColor = Color.FromArgb(230, 230, 255)
-            Case "Geplant"
-                backColor = Color.LightCyan
             Case Else
                 backColor = Color.White
         End Select
+
+        row.DefaultCellStyle.BackColor = backColor
 
         ' Priorität Dringend
         If prioritaet = 1 Then
@@ -131,26 +132,6 @@ Public Class PatientenGridManager
         Else
             row.DefaultCellStyle.ForeColor = Color.Black
         End If
-
-        row.DefaultCellStyle.BackColor = backColor
-
-
-        '' Bei Notfall überschreiben (außer bei Blink-Effekt)
-        'If prioritaet = 2 AndAlso Not parent.IsBlinking Then
-        '    If status = "Fertig" Then
-        '        row.Cells("Prioritaet").Style.BackColor = Color.LightCoral
-        '    Else
-        '        backColor = Color.FromArgb(255, 150, 150)
-        '    End If
-        '    row.DefaultCellStyle.ForeColor = Color.DarkRed
-        '    row.DefaultCellStyle.Font = New Font(dgvPatienten.Font, FontStyle.Bold)
-        'ElseIf prioritaet = 1 Then
-        '    row.DefaultCellStyle.ForeColor = Color.DarkOrange
-        'Else
-        '    row.DefaultCellStyle.ForeColor = Color.Black
-        'End If
-
-        'row.DefaultCellStyle.BackColor = backColor
     End Sub
 
     Public Sub SortierePatienten()
