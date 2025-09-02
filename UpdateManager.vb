@@ -7,6 +7,17 @@ Public Class UpdateManager
     Private ReadOnly gridManager As PatientenGridManager
     Private ReadOnly serverComm As ServerKommunikation
 
+    Private _isPaused As Boolean = False
+
+    Public Sub PauseUpdates()
+        _isPaused = True
+    End Sub
+
+    Public Sub ResumeUpdates()
+        _isPaused = False
+    End Sub
+
+
     Public Sub New(parentForm As FormPAS, grid As PatientenGridManager, server As ServerKommunikation)
         parent = parentForm
         gridManager = grid
@@ -14,6 +25,7 @@ Public Class UpdateManager
     End Sub
 
     Public Async Sub IntelligentesUpdate()
+        If _isPaused Then Return
         Try
             ' Prüfen ob Edit-Modus aktiv
             If parent.PatientenGrid.IsCurrentCellInEditMode OrElse Control.MouseButtons <> MouseButtons.None Then
@@ -181,4 +193,6 @@ Public Class UpdateManager
         Dim position = row.Index
         Return position * basiszeitProPatient
     End Function
+
+
 End Class

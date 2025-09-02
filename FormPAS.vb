@@ -164,17 +164,30 @@ Public Class FormPAS
         Dim status = row.Cells("Status").Value?.ToString()
 
         If status = "Geplant" Then
+            Dim patientenID = row.Cells("PatientenID").Value?.ToString()
+
+            ' Status auf Wartend setzen
             row.Cells("Status").Value = "Wartend"
             row.Cells("Ankunftszeit").Value = DateTime.Now
+            row.Cells("Wartezeit").Value = "0 min"  ' WICHTIG: Wartezeit auf 0 setzen!
 
-            Dim patientenID = row.Cells("PatientenID").Value?.ToString()
+            ' Server-Update mit CheckInPatient statt StatusUpdate
             Task.Run(Async Function()
-                         Await ServerComm.StatusUpdate(patientenID, "Wartend", DateTime.Now)
+                         ' Wenn CheckInPatient Methode existiert:
+                         If ServerComm IsNot Nothing Then
+                             Await ServerComm.CheckInPatient(patientenID)
+                         Else
+                             ' Fallback auf StatusUpdate
+                             Await ServerComm.StatusUpdate(patientenID, "Wartend", DateTime.Now)
+                         End If
                          Return True
                      End Function)
 
             GridManager.FaerbeZeilenNachStatus()
             GridManager.SortierePatienten()
+
+            ' Statusmeldung
+            lblStatus.Text = $"Patient {patientenID} eingecheckt - Wartezeit: 0"
         End If
     End Sub
 
@@ -1307,41 +1320,6 @@ Public Class FormPAS
         Return ""
     End Function
 
-    Private Async Sub btnCheckIn_Click(sender As Object, e As EventArgs) Handles btnCheckIn.Click
-        If dgvPatienten.CurrentRow Is Nothing Then Return
-
-        Dim row = dgvPatienten.CurrentRow
-        Dim status = row.Cells("Status").Value?.ToString()
-        Dim patientenID = row.Cells("PatientenID").Value?.ToString()
-
-        If status = "Geplant" Then
-            ' Status auf Wartend setzen
-            row.Cells("Status").Value = "Wartend"
-            row.Cells("Ankunftszeit").Value = DateTime.Now
-            row.Cells("Wartezeit").Value = "0 min"  ' WICHTIG: Wartezeit auf 0
-
-            ' Check-In über neue Methode
-            Dim erfolg = Await ServerComm.CheckInPatient(patientenID)
-
-            If erfolg Then
-                ' Grid aktualisieren
-                GridManager.FaerbeZeilenNachStatus()
-                GridManager.SortierePatienten()
-                Logger.Debug($"Patient {patientenID} eingecheckt - Wartezeit: 0")
-                lblStatus.Text = $"Patient {patientenID} eingecheckt"
-            Else
-                MessageBox.Show("Check-In konnte nicht an Server übertragen werden",
-                          "Warnung", MessageBoxButtons.OK, MessageBoxIcon.Warning)
-                ' Bei Fehler zurücksetzen
-                row.Cells("Status").Value = "Geplant"
-            End If
-        Else
-            MessageBox.Show("Nur geplante Patienten können eingecheckt werden.",
-                       "Hinweis", MessageBoxButtons.OK, MessageBoxIcon.Information)
-        End If
-    End Sub
-
-    ' In FormPAS.vb - NeuerPatientVonXML Methode ersetzen:
 
     Public Sub NeuerPatientVonXML(xmlPatient As GDTParser.XMLPatient)
         Try
@@ -1350,20 +1328,37 @@ Public Class FormPAS
                 Return
             End If
 
-            ' Formular in den Vordergrund bringen
-            Me.WindowState = FormWindowState.Normal
-            Me.BringToFront()
-            Me.Activate()
-            Me.TopMost = True
-            Application.DoEvents()
-            Me.TopMost = False
+            ' Neuen Dialog in separatem Thread/Context öffnen
+            Dim zimmer As String = "Wartezimmer"
+            Dim sofortCheckIn As Boolean = True
+            Dim dialogResult As DialogResult = DialogResult.Cancel
 
-            ' Bestätigungsdialog anzeigen
-            Dim result = ShowXMLPatientImportDialog(xmlPatient)
+            ' Dialog in eigenem UI-Context
+            Dim dialogThread As New Threading.Thread(
+            Sub()
+                Try
+                    Using dialog As New XMLImportDialog(xmlPatient)
+                        dialogResult = dialog.ShowDialog()
+                        If dialogResult = DialogResult.OK Then
+                            zimmer = dialog.SelectedZimmer
+                            sofortCheckIn = dialog.SofortCheckIn
+                        End If
+                    End Using
+                Catch ex As Exception
+                    Logger.Debug($"Dialog-Fehler: {ex.Message}")
+                End Try
+            End Sub)
 
-            If result.Bestaetigt Then
-                ' Patient mit gewähltem Zimmer und Wartezeit 0 hinzufügen
-                AddPatientFromXMLImport(xmlPatient, result.Zimmer, result.IstCheckIn)
+            dialogThread.SetApartmentState(Threading.ApartmentState.STA)
+            dialogThread.Start()
+            dialogThread.Join() ' Warten bis Dialog geschlossen
+
+            ' Nach Dialog-Schluss
+            If dialogResult = DialogResult.OK Then
+                ' Patient hinzufügen
+                Me.Invoke(Sub()
+                              AddPatientFromXMLImport(xmlPatient, zimmer, sofortCheckIn)
+                          End Sub)
             End If
 
         Catch ex As Exception
@@ -1371,162 +1366,6 @@ Public Class FormPAS
         End Try
     End Sub
 
-    ' Neue Methode für den Import-Dialog
-    Private Function ShowXMLPatientImportDialog(xmlPatient As GDTParser.XMLPatient) As (Bestaetigt As Boolean, Zimmer As String, IstCheckIn As Boolean)
-        ' Variablen VOR ShowDialog deklarieren
-        Dim dialogResult As DialogResult
-        Dim zimmer As String = ""
-        Dim istCheckIn As Boolean = False
-
-        Dim importDialog As New Form With {
-        .Text = "Patient aus Medical Office gefunden",
-        .Size = New Size(500, 380),
-        .StartPosition = FormStartPosition.CenterScreen,
-        .FormBorderStyle = FormBorderStyle.FixedDialog,
-        .MaximizeBox = False,
-        .MinimizeBox = False,
-        .TopMost = True,
-        .BackColor = Color.White
-    }
-
-        ' Header Panel mit Icon
-        Dim headerPanel As New Panel With {
-        .Dock = DockStyle.Top,
-        .Height = 60,
-        .BackColor = Color.FromArgb(40, 167, 69)
-    }
-
-        Dim lblHeader As New Label With {
-        .Text = "✓ Patient gefunden",
-        .Font = New Font("Segoe UI", 16, FontStyle.Bold),
-        .ForeColor = Color.White,
-        .Location = New Point(20, 15),
-        .AutoSize = True
-    }
-        headerPanel.Controls.Add(lblHeader)
-
-        ' Frage-Label
-        Dim lblFrage As New Label With {
-        .Text = "Möchten Sie den Patienten eintragen?",
-        .Location = New Point(20, 75),
-        .Size = New Size(440, 25),
-        .Font = New Font("Segoe UI", 11)
-    }
-
-        ' Patient-Details Panel
-        Dim detailsPanel As New Panel With {
-        .Location = New Point(20, 105),
-        .Size = New Size(440, 90),
-        .BackColor = Color.FromArgb(248, 249, 250),
-        .BorderStyle = BorderStyle.FixedSingle
-    }
-
-        Dim lblDetails As New Label With {
-        .Text = $"PatNr: {xmlPatient.PatientenID}" & vbCrLf &
-                $"Name: {xmlPatient.Nachname}, {xmlPatient.Vorname}" & vbCrLf &
-                $"Geburtsdatum: {xmlPatient.Geburtsdatum}" &
-                If(Not String.IsNullOrEmpty(xmlPatient.ScheinID), vbCrLf & $"Schein-ID: {xmlPatient.ScheinID}", ""),
-        .Location = New Point(10, 10),
-        .Size = New Size(420, 70),
-        .Font = New Font("Segoe UI", 10)
-    }
-        detailsPanel.Controls.Add(lblDetails)
-
-        ' Zimmer-Auswahl
-        Dim lblZimmer As New Label With {
-        .Text = "Bereich/Zimmer:",
-        .Location = New Point(20, 210),
-        .Size = New Size(120, 25),
-        .Font = New Font("Segoe UI", 10)
-    }
-
-        Dim cboZimmer As New ComboBox With {
-        .Location = New Point(145, 208),
-        .Size = New Size(315, 25),
-        .DropDownStyle = ComboBoxStyle.DropDownList,
-        .Font = New Font("Segoe UI", 10)
-    }
-
-        ' Bereiche laden
-        Try
-            For Each bereich In ConfigModule.BereicheListe
-                If bereich.Aktiv Then
-                    cboZimmer.Items.Add(bereich.Bezeichnung)
-                End If
-            Next
-        Catch
-            ' Fallback wenn BereicheListe nicht verfügbar
-            cboZimmer.Items.AddRange({"Wartezimmer", "Anmeldung", "Labor",
-                                  "Zimmer 1", "Zimmer 2", "Zimmer 3",
-                                  "Zimmer 4", "Zimmer 5", "EKG"})
-        End Try
-
-        cboZimmer.SelectedIndex = 0 ' Wartezimmer als Standard
-
-        ' Check-In Checkbox
-        Dim chkCheckIn As New CheckBox With {
-        .Text = "Sofort einchecken (Wartezeit beginnt jetzt)",
-        .Location = New Point(20, 245),
-        .Size = New Size(440, 25),
-        .Font = New Font("Segoe UI", 10),
-        .Checked = True ' Standardmäßig aktiviert
-    }
-
-        ' Buttons
-        Dim btnEintragen As New Button With {
-        .Text = "✓ Eintragen",
-        .Location = New Point(150, 290),
-        .Size = New Size(130, 40),
-        .DialogResult = dialogResult.OK,
-        .BackColor = Color.FromArgb(40, 167, 69),
-        .ForeColor = Color.White,
-        .FlatStyle = FlatStyle.Flat,
-        .Font = New Font("Segoe UI", 11, FontStyle.Bold),
-        .Cursor = Cursors.Hand
-    }
-        btnEintragen.FlatAppearance.BorderSize = 0
-
-        Dim btnAbbrechen As New Button With {
-        .Text = "Abbrechen",
-        .Location = New Point(290, 290),
-        .Size = New Size(110, 40),
-        .DialogResult = dialogResult.Cancel,
-        .BackColor = Color.FromArgb(108, 117, 125),
-        .ForeColor = Color.White,
-        .FlatStyle = FlatStyle.Flat,
-        .Font = New Font("Segoe UI", 11),
-        .Cursor = Cursors.Hand
-    }
-        btnAbbrechen.FlatAppearance.BorderSize = 0
-
-        ' Controls hinzufügen
-        importDialog.Controls.Add(headerPanel)
-        importDialog.Controls.Add(lblFrage)
-        importDialog.Controls.Add(detailsPanel)
-        importDialog.Controls.Add(lblZimmer)
-        importDialog.Controls.Add(cboZimmer)
-        importDialog.Controls.Add(chkCheckIn)
-        importDialog.Controls.Add(btnEintragen)
-        importDialog.Controls.Add(btnAbbrechen)
-
-
-
-        ' Dialog anzeigen
-        DialogResult = importDialog.ShowDialog(Me)
-
-        ' Werte nach dem Schließen auslesen, aber vor Dispose
-        If dialogResult = DialogResult.OK Then
-            zimmer = cboZimmer.SelectedItem?.ToString()
-            istCheckIn = chkCheckIn.Checked
-        End If
-
-        importDialog.Dispose()
-
-        ' Ergebnis zurückgeben
-        Return (dialogResult = DialogResult.OK,
-            If(String.IsNullOrEmpty(zimmer), "Wartezimmer", zimmer),
-            istCheckIn)
-    End Function
 
     ' Hilfsmethode zum Hinzufügen des Patienten
     Private Sub AddPatientFromXMLImport(xmlPatient As GDTParser.XMLPatient, zimmer As String, istCheckIn As Boolean)
@@ -1638,6 +1477,70 @@ Public Class FormPAS
             MessageBox.Show($"Fehler beim Import: {ex.Message}",
                        "Fehler", MessageBoxButtons.OK, MessageBoxIcon.Error)
         End Try
+    End Sub
+
+    Public Async Function CheckInPatient(patientenID As String) As Task(Of Boolean)
+        ' Erst versuchen mit Check-In API
+        Try
+            Dim values As New Dictionary(Of String, String) From {
+            {"patientenID", patientenID},
+            {"status", "Wartend"},
+            {"wartezeit", "0"},
+            {"ankunftszeit", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}
+        }
+
+            Dim content = New FormUrlEncodedContent(values)
+            Dim response = Await HttpClient.PostAsync($"{ServiceUrl}/api/checkin", content)
+
+            If response.IsSuccessStatusCode Then
+                Logger.Debug($"Patient {patientenID} erfolgreich eingecheckt - Wartezeit auf 0 gesetzt")
+                Return True
+            End If
+        Catch ex As Exception
+            Logger.Debug($"Check-In API Fehler: {ex.Message}")
+        End Try
+
+        ' Wenn Check-In fehlschlägt, normales StatusUpdate verwenden
+        Logger.Debug("Fallback auf StatusUpdate")
+        Return Await ServerComm.StatusUpdate(patientenID, "Wartend", DateTime.Now)
+    End Function
+
+    Private Async Sub btnCheckIn_Click(sender As Object, e As EventArgs) Handles btnCheckIn.Click
+        If dgvPatienten.CurrentRow Is Nothing Then Return
+
+        Dim row = dgvPatienten.CurrentRow
+        Dim status = row.Cells("Status").Value?.ToString()
+        Dim patientenID = row.Cells("PatientenID").Value?.ToString()
+
+        If status = "Geplant" Then
+            ' Status auf Wartend setzen
+            row.Cells("Status").Value = "Wartend"
+            row.Cells("Ankunftszeit").Value = DateTime.Now
+            row.Cells("Wartezeit").Value = "0 min"  ' WICHTIG: Wartezeit auf 0
+
+            ' Check-In durchführen
+            Dim erfolg As Boolean = False
+
+            ' Erst versuchen CheckInPatient zu verwenden, falls nicht vorhanden dann StatusUpdate
+            erfolg = Await ServerComm.CheckInPatient(patientenID)
+
+            If erfolg Then
+                ' Grid aktualisieren
+                GridManager.FaerbeZeilenNachStatus()
+                GridManager.SortierePatienten()
+                lblStatus.Text = $"Patient {patientenID} eingecheckt - Wartezeit: 0"
+                Logger.Debug($"Patient {patientenID} eingecheckt - Wartezeit auf 0 gesetzt")
+            Else
+                MessageBox.Show("Check-In konnte nicht an Server übertragen werden",
+                              "Warnung", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+                ' Bei Fehler zurücksetzen
+                row.Cells("Status").Value = "Geplant"
+                row.Cells("Wartezeit").Value = "-"
+            End If
+        Else
+            MessageBox.Show("Nur geplante Patienten können eingecheckt werden.",
+                           "Hinweis", MessageBoxButtons.OK, MessageBoxIcon.Information)
+        End If
     End Sub
 
 End Class

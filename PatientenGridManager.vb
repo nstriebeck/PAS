@@ -7,12 +7,13 @@ Public Class PatientenGridManager
     Private ReadOnly dgvPatienten As DataGridView
     Private ReadOnly parent As FormPAS
     Private isUpdating As Boolean = False
+    Private _farbCache As Dictionary(Of String, Color)
 
     Public Sub New(grid As DataGridView, parentForm As FormPAS)
         dgvPatienten = grid
         parent = parentForm
+        LoadeFarbenAusDB()
     End Sub
-
     Public Sub InitializeGrid()
         dgvPatienten.Columns.Clear()
         dgvPatienten.AutoGenerateColumns = False
@@ -89,6 +90,63 @@ Public Class PatientenGridManager
         AddHandler dgvPatienten.DataError, AddressOf dgvPatienten_DataError
     End Sub
 
+    Private Sub LoadeFarbenAusDB()
+        _farbCache = New Dictionary(Of String, Color)
+
+        Try
+            Using conn As New SqlConnection(ConfigModule.SqlConnectionString)
+                conn.Open()
+
+                ' Prüfen ob Tabelle existiert
+                Dim checkCmd As New SqlCommand(
+                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Farbkonfiguration'", conn)
+
+                If CInt(checkCmd.ExecuteScalar()) > 0 Then
+                    ' Farben aus DB laden
+                    Dim query = "SELECT StatusName, FarbeHex FROM Farbkonfiguration"
+                    Using cmd As New SqlCommand(query, conn)
+                        Using reader = cmd.ExecuteReader()
+                            While reader.Read()
+                                Dim statusName = reader.GetString(0).ToLower()
+                                Dim hexColor = reader.GetString(1)
+                                Try
+                                    _farbCache(statusName) = ColorTranslator.FromHtml(hexColor)
+                                    Logger.Debug($"Farbe geladen: {statusName} = {hexColor}")
+                                Catch
+                                    ' Bei Fehler Standard-Farbe verwenden
+                                End Try
+                            End While
+                        End Using
+                    End Using
+                End If
+            End Using
+        Catch ex As Exception
+            Logger.Debug($"Fehler beim Laden der Farben: {ex.Message}")
+        End Try
+
+        ' Falls keine Farben geladen wurden, Standards setzen
+        If _farbCache.Count = 0 Then
+            SetzeStandardFarben()
+        End If
+    End Sub
+
+    Private Sub SetzeStandardFarben()
+        _farbCache("wartend") = Color.FromArgb(255, 152, 0)      ' Kräftiges Orange
+        _farbCache("aufgerufen") = Color.FromArgb(76, 175, 80)   ' Kräftiges Grün
+        _farbCache("inbehandlung") = Color.FromArgb(33, 150, 243) ' Kräftiges Blau
+        _farbCache("fertig") = Color.FromArgb(158, 158, 158)     ' Mittelgrau
+        _farbCache("notfall") = Color.FromArgb(244, 67, 54)      ' Kräftiges Rot
+        _farbCache("notfallblink") = Color.FromArgb(255, 205, 210) ' Hellrot
+    End Sub
+
+    Private Function GetFarbe(status As String) As Color
+        Dim key = status.ToLower().Replace(" ", "")
+        If _farbCache.ContainsKey(key) Then
+            Return _farbCache(key)
+        End If
+        Return Color.White
+    End Function
+
     Public Sub FaerbeZeilenNachStatus()
         For Each row As DataGridViewRow In dgvPatienten.Rows
             If row.IsNewRow Then Continue For
@@ -102,35 +160,25 @@ Public Class PatientenGridManager
     End Sub
 
     Private Sub SetzeZeilenFarbe(row As DataGridViewRow, status As String, prioritaet As Integer)
-        ' Bei Notfall mit Status Wartend/Aufgerufen NICHT hier färben
-        ' Der Blink-Timer übernimmt das
+        ' Bei Notfall mit Status Wartend/Aufgerufen - Blink-Timer übernimmt
         If prioritaet = 2 AndAlso (status = "Wartend" OrElse status = "Aufgerufen") Then
-            ' Nichts tun - Blink-Timer macht die Arbeit
-            Return
+            Return ' Blink-Timer macht die Arbeit
         End If
 
-        ' Normale Färbung für andere Fälle
-        Dim backColor As Color
-        Select Case status
-            Case "Wartend"
-                backColor = Color.FromArgb(255, 230, 230)
-            Case "Aufgerufen"
-                backColor = Color.FromArgb(255, 255, 200)
-            Case "InBehandlung"
-                backColor = Color.FromArgb(230, 255, 230)
-            Case "Fertig"
-                backColor = Color.FromArgb(230, 230, 255)
-            Case Else
-                backColor = Color.White
-        End Select
-
+        ' Farbe aus Cache holen
+        Dim backColor As Color = GetFarbe(status)
         row.DefaultCellStyle.BackColor = backColor
+
+        ' Text-Farbe anpassen basierend auf Hintergrund
+        If backColor.GetBrightness() < 0.5 Then
+            row.DefaultCellStyle.ForeColor = Color.White
+        Else
+            row.DefaultCellStyle.ForeColor = Color.Black
+        End If
 
         ' Priorität Dringend
         If prioritaet = 1 Then
-            row.DefaultCellStyle.ForeColor = Color.DarkOrange
-        Else
-            row.DefaultCellStyle.ForeColor = Color.Black
+            row.DefaultCellStyle.Font = New Font(dgvPatienten.Font, FontStyle.Bold)
         End If
     End Sub
 
@@ -183,62 +231,6 @@ Public Class PatientenGridManager
         End If
 
         dgvPatienten.ResumeLayout()
-    End Sub
-
-    'Public Sub SortierePatienten()
-    '    If dgvPatienten.Rows.Count = 0 Then Return
-
-    '    Dim sortedList = dgvPatienten.Rows.Cast(Of DataGridViewRow)().
-    '    Where(Function(r) Not r.IsNewRow).
-    '    OrderBy(Function(r)
-    '                ' Erst nach Status (Fertig = 0, andere = 1)
-    '                If r.Cells("Status").Value?.ToString() = "Fertig" Then
-    '                    Return 0
-    '                Else
-    '                    Return 1
-    '                End If
-    '            End Function).
-    '    ThenByDescending(Function(r)
-    '                         ' Dann nach Priorität (nur bei nicht-fertigen)
-    '                         If r.Cells("Status").Value?.ToString() <> "Fertig" Then
-    '                             Return CInt(If(r.Cells("PrioritaetWert").Value, 0))
-    '                         Else
-    '                             Return -1 ' Fertige ignorieren Priorität
-    '                         End If
-    '                     End Function).
-    '    ThenBy(Function(r) r.Cells("Ankunftszeit").Value).
-    '    ToList()
-
-    '    dgvPatienten.Rows.Clear()
-    '    dgvPatienten.Rows.AddRange(sortedList.ToArray())
-    '    dgvPatienten.ClearSelection()
-    'End Sub
-
-    Public Sub SetzeHistorieModus(aktivieren As Boolean)
-        If aktivieren Then
-            If Not dgvPatienten.Columns.Contains("Aufgerufen") Then
-                dgvPatienten.Columns.Add(New DataGridViewTextBoxColumn With {
-                    .Name = "Aufgerufen",
-                    .HeaderText = "Aufgerufen",
-                    .Width = 70,
-                    .DefaultCellStyle = New DataGridViewCellStyle With {.Format = "HH:mm"}
-                })
-
-                dgvPatienten.Columns.Add(New DataGridViewTextBoxColumn With {
-                    .Name = "Behandlungsbeginn",
-                    .HeaderText = "Beginn",
-                    .Width = 70,
-                    .DefaultCellStyle = New DataGridViewCellStyle With {.Format = "HH:mm"}
-                })
-
-                dgvPatienten.Columns.Add(New DataGridViewTextBoxColumn With {
-                    .Name = "Behandlungsende",
-                    .HeaderText = "Ende",
-                    .Width = 70,
-                    .DefaultCellStyle = New DataGridViewCellStyle With {.Format = "HH:mm"}
-                })
-            End If
-        End If
     End Sub
 
     Public Function GetPrioritaetText(prioritaet As Integer) As String

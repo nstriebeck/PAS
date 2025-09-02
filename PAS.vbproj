@@ -76,6 +76,9 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="BereicheManager.vb" />
+    <Compile Include="XMLImportDialog.vb">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="UpdateManager.vb">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Compile>
