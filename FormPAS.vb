@@ -506,9 +506,9 @@ Public Class FormPAS
                                           End Sub)
 
             ' Timer verzögert starten
-            Task.Delay(1000).ContinueWith(Sub(t)
-                                              Me.Invoke(Sub() timerRefresh.Start())
-                                          End Sub)
+            'Task.Delay(1000).ContinueWith(Sub(t)
+            'Me.Invoke(Sub() timerRefresh.Start())
+            'End Sub)
 
         Else
             ' Historie/Planung
@@ -855,6 +855,14 @@ Public Class FormPAS
     End Sub
 
     Private Sub timerRefresh_Tick(sender As Object, e As EventArgs) Handles timerRefresh.Tick
+        ' Alle 10 Zyklen Duplikate bereinigen (alle 50 Sekunden)
+        Static cycleCount As Integer = 0
+        cycleCount += 1
+
+        If cycleCount Mod 10 = 0 Then
+            UpdateManager.BereinigeDuplikate()
+        End If
+
         UpdateManager.IntelligentesUpdate()
     End Sub
 

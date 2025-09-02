@@ -24,6 +24,71 @@ Public Class UpdateManager
         serverComm = server
     End Sub
 
+    'Public Async Sub IntelligentesUpdate()
+    '    If _isPaused Then Return
+    '    Try
+    '        ' Prüfen ob Edit-Modus aktiv
+    '        If parent.PatientenGrid.IsCurrentCellInEditMode OrElse Control.MouseButtons <> MouseButtons.None Then
+    '            Return
+    '        End If
+
+    '        ' Prüfen ob von Planung/Historie gekommen
+    '        Dim vonPlanungGekommen = False
+    '        If parent.PatientenGrid.Rows.Count > 0 Then
+    '            For Each row As DataGridViewRow In parent.PatientenGrid.Rows
+    '                If Not row.IsNewRow AndAlso row.Cells("Status").Value?.ToString() = "Geplant" Then
+    '                    vonPlanungGekommen = True
+    '                    Exit For
+    '                End If
+    '            Next
+    '        End If
+
+    '        If vonPlanungGekommen Then
+    '            parent.PatientenGrid.Rows.Clear()
+    '        End If
+
+    '        ' Neue Daten vom Server holen
+    '        Dim neueDaten = Await serverComm.HoleDatenVomServer()
+    '        Dim aktuellePatientenIDs As New HashSet(Of String)
+
+    '        ' Existierende Zeilen sammeln
+    '        Dim existierendeZeilen As New Dictionary(Of String, DataGridViewRow)
+    '        For Each row As DataGridViewRow In parent.PatientenGrid.Rows
+    '            If Not row.IsNewRow Then
+    '                Dim patID = row.Cells("PatientenID").Value?.ToString()
+    '                If Not String.IsNullOrEmpty(patID) Then
+    '                    existierendeZeilen(patID) = row
+    '                End If
+    '            End If
+    '        Next
+
+    '        ' Daten aktualisieren oder hinzufügen
+    '        For Each patient In neueDaten
+    '            aktuellePatientenIDs.Add(patient.PatientenID)
+
+    '            If existierendeZeilen.ContainsKey(patient.PatientenID) Then
+    '                ' Existierende Zeile aktualisieren
+    '                UpdateExistingRow(existierendeZeilen(patient.PatientenID), patient)
+    '            Else
+    '                ' Neue Zeile hinzufügen
+    '                AddNewRow(patient)
+    '            End If
+    '        Next
+
+    '        ' Entfernte Patienten löschen
+    '        RemoveOldPatients(aktuellePatientenIDs)
+
+    '        ' Grid aktualisieren
+    '        gridManager.SortierePatienten()
+    '        gridManager.FaerbeZeilenNachStatus()
+    '        parent.PatientenGrid.ClearSelection()
+    '        parent.UpdateStatusBar()
+
+    '    Catch ex As Exception
+    '        Logger.Debug($"Update-Fehler: {ex.Message}")
+    '    End Try
+    'End Sub
+
     Public Async Sub IntelligentesUpdate()
         If _isPaused Then Return
         Try
@@ -32,32 +97,29 @@ Public Class UpdateManager
                 Return
             End If
 
-            ' Prüfen ob von Planung/Historie gekommen
-            Dim vonPlanungGekommen = False
-            If parent.PatientenGrid.Rows.Count > 0 Then
-                For Each row As DataGridViewRow In parent.PatientenGrid.Rows
-                    If Not row.IsNewRow AndAlso row.Cells("Status").Value?.ToString() = "Geplant" Then
-                        vonPlanungGekommen = True
-                        Exit For
-                    End If
-                Next
-            End If
-
-            If vonPlanungGekommen Then
-                parent.PatientenGrid.Rows.Clear()
-            End If
-
             ' Neue Daten vom Server holen
             Dim neueDaten = Await serverComm.HoleDatenVomServer()
             Dim aktuellePatientenIDs As New HashSet(Of String)
 
-            ' Existierende Zeilen sammeln
+            ' WICHTIG: Existierende Zeilen sammeln BEVOR wir ändern
             Dim existierendeZeilen As New Dictionary(Of String, DataGridViewRow)
-            For Each row As DataGridViewRow In parent.PatientenGrid.Rows
+
+            ' Duplikat-Prüfung: PatientenIDs sammeln um doppelte zu entfernen
+            Dim gefundeneIDs As New HashSet(Of String)
+
+            For i As Integer = parent.PatientenGrid.Rows.Count - 1 To 0 Step -1
+                Dim row = parent.PatientenGrid.Rows(i)
                 If Not row.IsNewRow Then
                     Dim patID = row.Cells("PatientenID").Value?.ToString()
                     If Not String.IsNullOrEmpty(patID) Then
-                        existierendeZeilen(patID) = row
+                        ' Duplikat gefunden - entfernen
+                        If gefundeneIDs.Contains(patID) Then
+                            Logger.Debug($"Duplikat entfernt: {patID}")
+                            parent.PatientenGrid.Rows.RemoveAt(i)
+                        Else
+                            gefundeneIDs.Add(patID)
+                            existierendeZeilen(patID) = row
+                        End If
                     End If
                 End If
             Next
@@ -70,8 +132,18 @@ Public Class UpdateManager
                     ' Existierende Zeile aktualisieren
                     UpdateExistingRow(existierendeZeilen(patient.PatientenID), patient)
                 Else
-                    ' Neue Zeile hinzufügen
-                    AddNewRow(patient)
+                    ' Neue Zeile hinzufügen - aber nur wenn nicht schon vorhanden
+                    Dim bereitsVorhanden = False
+                    For Each row As DataGridViewRow In parent.PatientenGrid.Rows
+                        If Not row.IsNewRow AndAlso row.Cells("PatientenID").Value?.ToString() = patient.PatientenID Then
+                            bereitsVorhanden = True
+                            Exit For
+                        End If
+                    Next
+
+                    If Not bereitsVorhanden Then
+                        AddNewRow(patient)
+                    End If
                 End If
             Next
 
@@ -86,6 +158,39 @@ Public Class UpdateManager
 
         Catch ex As Exception
             Logger.Debug($"Update-Fehler: {ex.Message}")
+        End Try
+    End Sub
+    Public Sub BereinigeDuplikate()
+        Try
+            Dim gefundeneIDs As New HashSet(Of String)
+            Dim zuEntfernen As New List(Of Integer)
+
+            For i As Integer = 0 To parent.PatientenGrid.Rows.Count - 1
+                Dim row = parent.PatientenGrid.Rows(i)
+                If Not row.IsNewRow Then
+                    Dim patID = row.Cells("PatientenID").Value?.ToString()
+                    If Not String.IsNullOrEmpty(patID) Then
+                        If gefundeneIDs.Contains(patID) Then
+                            zuEntfernen.Add(i)
+                            Logger.Debug($"Duplikat-Bereinigung: {patID} entfernt")
+                        Else
+                            gefundeneIDs.Add(patID)
+                        End If
+                    End If
+                End If
+            Next
+
+            ' Duplikate von hinten nach vorne entfernen
+            For i As Integer = zuEntfernen.Count - 1 To 0 Step -1
+                parent.PatientenGrid.Rows.RemoveAt(zuEntfernen(i))
+            Next
+
+            If zuEntfernen.Count > 0 Then
+                Logger.Debug($"{zuEntfernen.Count} Duplikate bereinigt")
+            End If
+
+        Catch ex As Exception
+            Logger.Debug($"Fehler bei Duplikat-Bereinigung: {ex.Message}")
         End Try
     End Sub
 
